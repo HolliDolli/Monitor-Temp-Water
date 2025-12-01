@@ -1,22 +1,28 @@
 esp32:
   board: lolin32_lite
+  framework:
+    type: esp-idf
   
 esphome:
-  name: lolin
-  on_boot:
-    priority: -100
-    then:
-      - logger.log: 'Lolin boot triggered'
-      - switch.turn_on: SW27
-      - script.execute: consider_deep_sleep
-  on_shutdown:
-    priority: -100
-    then:
-      - switch.turn_off: SW27
-      - logger.log: "Lolin shutdown triggered"
+  name: monitor-tw
 
 # Enable logging
 logger:
+
+wifi:
+  ssid: !secret BGssid
+#  for captive-portal remove password
+  password: !secret BGpassword
+  ap:
+    ssid: !secret FBssid
+    password: !secret FBpassword
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+captive_portal:
+
+
+ota:
+  - platform: esphome
 
 # Enable Home Assistant API
 #
@@ -26,22 +32,8 @@ api:
   password: ""
  #  reboot_timeout: 0s  # only enable this when creating an offline Wastebin
 
-ota:
-  password: ""
 
-wifi:
-  ssid: !secret GKssid
-#  for captive-portal remove password
-  password: !secret GKpassword
-  ap:
-    ssid: !secret FBssid
-    password: !secret FBpassword
 
-  # Enable fallback hotspot (captive portal) in case wifi connection fails
-captive_portal:
-#  keep_user_credentials: true  # option nicht aktiv.
-
-# i2c Bus auf D1 und D2 konfigurieren
   
 time:
   - platform: homeassistant
@@ -49,128 +41,35 @@ time:
 sun:
   latitude: 51.14°
   longitude: 9.414°
+  
+# Example configuration entry
+esp32_touch:
+  setup_mode: false  
+  
+# Example configuration entry
+one_wire:
+  - platform: gpio
+    pin: GPIO4  
 
-output:
-  - platform: gpio
-    pin: GPIO22
-    id: 'LEDint'
-  - platform: gpio
-    pin: GPIO25
-    id: 'GPIO25'
-  - platform: gpio
-    pin: GPIO26
-    id: 'GPIO26'
-  - platform: gpio
-    pin: GPIO27
-    id: 'GPIO27'
-    
-text_sensor:
-  - platform: version
-    name: "ESPHome Version"  
-
+  
+# Example configuration entry
 binary_sensor:
-  - platform: homeassistant
-    id: prevent_deep_sleep
-    name: Prevent Deep Sleep
-    entity_id: input_boolean.test_lolin_prevent_deepsleep
-    on_state: 
-      - script.execute: consider_deep_sleep
-  - platform: homeassistant
-    id: lolin_prevent_deep_sleep
-    name: Lolin Prevent Deep Sleep
-    entity_id: input_boolean.bg_briefkasten_prevent_deepsleep
-    on_state: 
-      - script.execute: consider_deep_sleep
-
-      
+  - platform: esp32_touch
+    name: "esp32touchpad"
+    id: "esp32touchpad"
+    pin: GPIO2
+    threshold: 800
+    
+    
 sensor:
-  - platform: adc
-    pin: GPIO32
-    name: GPIO32    
-    attenuation: auto
-  - platform: adc
-    pin: GPIO33
-    name: GPIO33    
-    attenuation: auto
-  - platform: adc
-    pin: GPIO34
-    name: GPIO34    
-    attenuation: auto
-#    update_interval: 2s
-  - platform: adc
-    pin: GPIO35
-    name: GPIO35    
-    attenuation: auto
-#    update_interval: 2s
-  - platform: adc
-    pin: GPIO36
-    name: GPIO36    
-    attenuation: auto
-  - platform: adc
-    pin: GPIO37
-    name: GPIO37    
-    attenuation: auto
-  - platform: adc
-    pin: GPIO38
-    name: GPIO38    
-    attenuation: auto
-  - platform: adc
-    pin: GPIO39
-    name: GPIO39    
-    attenuation: auto
-
-script:
-  - id: consider_deep_sleep
-    mode: restart
-    then:
-      - if:
-          condition:
-            api.connected:
-          then:
-            - if:
-                condition:
-                  binary_sensor.is_off: prevent_deep_sleep
-                then:
-#                  - logger.log: 'Allowing sleep, per prevent_deep_sleep'
-                  - deep_sleep.allow: deep_sleep_1
-                else:
-#                  - logger.log: 'Skipping sleep, per prevent_deep_sleep'
-                  - deep_sleep.prevent: deep_sleep_1
-          else:  
-#            - logger.log: 'Skipping sleep, per no api connection'
-            - deep_sleep.prevent: deep_sleep_1
-  
-switch:
-  - platform: output
-    name: "LEDint"
-    output: "LEDint"
-    inverted: true
-    restore_mode: ALWAYS_ON
-  - platform: output
-    name: "SW25"
-    output: "GPIO25"
-    restore_mode: ALWAYS_ON
-  - platform: output
-    name: "SW26"
-    output: "GPIO26"
-    restore_mode: ALWAYS_ON
-  - platform: output
-    id: SW27
-    name: "SW27"
-    output: "GPIO27"
-    restore_mode: ALWAYS_OFF
-
-interval:
-  - interval: 10s
-    then:
-      - script.execute: consider_deep_sleep
-
-deep_sleep:
-  run_duration: 2min
-  sleep_duration: 2min
-  id: deep_sleep_1
-#  wakeup_pin_mode: INVERT_WAKEUP
-#  wakeup_pin:
-#    number: GPIO12
-  
-  
+  - platform: dallas_temp
+    name: temp1
+    update_interval: 60s
+  - platform: dallas_temp
+    name: temp2
+    update_interval: 60s
+  - platform: template
+    name: "Raw touch value"
+    lambda: |-
+        return id(esp32touchpad).get_value();
+    update_interval: 1s
