@@ -10,9 +10,9 @@ esphome:
 logger:
 
 wifi:
-  ssid: !secret BGssid
+  ssid: !secret GKssid
 #  for captive-portal remove password
-  password: !secret BGpassword
+  password: !secret GKpassword
   ap:
     ssid: !secret FBssid
     password: !secret FBpassword
@@ -49,27 +49,28 @@ esp32_touch:
 # Example configuration entry
 one_wire:
   - platform: gpio
-    pin: GPIO4  
-
+    pin: GPIO27
   
 # Example configuration entry
 binary_sensor:
   - platform: esp32_touch
     name: "esp32touchpad"
     id: "esp32touchpad"
-    pin: GPIO2
-    threshold: 800
+    pin: GPIO33
+    threshold: 100
     
     
 sensor:
   - platform: dallas_temp
+    address: 0x3cb3637f0e64ff28
     name: temp1
-    update_interval: 60s
+    update_interval: 300s
   - platform: dallas_temp
+    address: 0x7d592f7f0e64ff28
     name: temp2
-    update_interval: 60s
+    update_interval: 300s
   - platform: template
     name: "Raw touch value"
     lambda: |-
         return id(esp32touchpad).get_value();
-    update_interval: 1s
+    update_interval: 300s
