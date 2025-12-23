@@ -62,11 +62,13 @@ binary_sensor:
     
 sensor:
   - platform: dallas_temp
-    address: 0x3cb3637f0e64ff28
+#    address: 0x3cb3637f0e64ff28
+    index: 0
     name: temp1
     update_interval: 300s
   - platform: dallas_temp
-    address: 0x7d592f7f0e64ff28
+#    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
+    index: 1
     name: temp2
     update_interval: 300s
   - platform: template
