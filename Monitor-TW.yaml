@@ -42,23 +42,25 @@ sun:
   latitude: 51.14°
   longitude: 9.414°
   
-# Example configuration entry
 esp32_touch:
   setup_mode: false  
   
-# Example configuration entry
 one_wire:
   - platform: gpio
     pin: GPIO27
+#    pin: GPIO26
   
-# Example configuration entry
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+
 binary_sensor:
   - platform: esp32_touch
     name: "esp32touchpad"
     id: "esp32touchpad"
     pin: GPIO33
-    threshold: 100
-    
+#    pin: GPIO14
+    threshold: 175
     
 sensor:
   - platform: dallas_temp
@@ -73,6 +75,7 @@ sensor:
     update_interval: 300s
   - platform: template
     name: "Raw touch value"
+    device_class: "voltage"
     lambda: |-
         return id(esp32touchpad).get_value();
     update_interval: 300s
