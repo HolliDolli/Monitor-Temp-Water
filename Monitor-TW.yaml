@@ -60,7 +60,7 @@ binary_sensor:
     id: "esp32touchpad"
     pin: GPIO33
 #    pin: GPIO14
-    threshold: 175
+    threshold: 170
     
 sensor:
   - platform: dallas_temp
@@ -76,6 +76,7 @@ sensor:
   - platform: template
     name: "Raw touch value"
     device_class: "voltage"
+    unit_of_measurement: "μV"
     lambda: |-
         return id(esp32touchpad).get_value();
     update_interval: 300s
