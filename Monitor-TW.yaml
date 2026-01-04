@@ -34,8 +34,7 @@ ota:
 #
 api:
   password: ""
- #  reboot_timeout: 0s  # only enable this when creating an offline Wastebin
-
+  reboot_timeout: 60min  # only enable this when creating an offline device; 0s=never reboot
 
 
   
