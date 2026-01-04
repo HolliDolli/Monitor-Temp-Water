@@ -10,9 +10,13 @@ esphome:
 logger:
 
 wifi:
-  ssid: !secret GKssid
-#  for captive-portal remove password
-  password: !secret GKpassword
+  networks:
+  - ssid: !secret GKssid
+    password: !secret GKpassword
+  - ssid: !secret BGssid
+    password: !secret BGpassword
+  - ssid: !secret SSssid
+    password: !secret SSpassword
   ap:
     ssid: !secret FBssid
     password: !secret FBpassword
@@ -47,8 +51,8 @@ esp32_touch:
   
 one_wire:
   - platform: gpio
-    pin: GPIO27
-#    pin: GPIO26
+#    pin: GPIO27
+    pin: GPIO26
   
 text_sensor:
   - platform: version
@@ -58,9 +62,9 @@ binary_sensor:
   - platform: esp32_touch
     name: "esp32touchpad"
     id: "esp32touchpad"
-    pin: GPIO33
-#    pin: GPIO14
-    threshold: 170
+#    pin: GPIO33
+    pin: GPIO14
+    threshold: 1000
     
 sensor:
   - platform: dallas_temp
