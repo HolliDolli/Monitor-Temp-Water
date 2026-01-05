@@ -4,7 +4,7 @@ esp32:
     type: esp-idf
   
 esphome:
-  name: monitor-tw
+  name: test-ds
 
 # Enable logging
 logger:
@@ -46,7 +46,7 @@ sun:
   longitude: 9.414°
   
 esp32_touch:
-  setup_mode: false  
+  setup_mode: true  
   
 one_wire:
   - platform: gpio
@@ -63,23 +63,25 @@ binary_sensor:
     id: "esp32touchpad"
 #    pin: GPIO33
     pin: GPIO14
-    threshold: 1700
+    threshold: 1000
     
 sensor:
   - platform: dallas_temp
-#    address: 0x3cb3637f0e64ff28
     index: 0
     name: temp1
-    update_interval: 300s
+    update_interval: 5s
   - platform: dallas_temp
-#    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 1
     name: temp2
-    update_interval: 300s
+    update_interval: 5s
+  - platform: dallas_temp
+    index: 2
+    name: temp3
+    update_interval: 5s
   - platform: template
     name: "Raw touch value"
     device_class: "frequency"
     unit_of_measurement: "kHz"
     lambda: |-
         return id(esp32touchpad).get_value();
-    update_interval: 300s
+    update_interval: 5s
