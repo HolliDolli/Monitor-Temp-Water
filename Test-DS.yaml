@@ -47,12 +47,15 @@ sun:
   
 esp32_touch:
   setup_mode: true  
+  low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
+  high_voltage_reference: 2.4V    # One of 2.4V, 2.5V, 2.6V, 2.7V. Default is 2.7V.
+  voltage_attenuation: 0V    # One of 1.5V, 1V, 0.5V, 0V. Default is 0V.
   
 one_wire:
   - platform: gpio
 #    pin: GPIO27
     pin: GPIO26
-  
+ 
 text_sensor:
   - platform: version
     name: "ESPHome Version"

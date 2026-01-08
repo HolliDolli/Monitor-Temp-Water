@@ -47,6 +47,9 @@ sun:
   
 esp32_touch:
   setup_mode: false  
+  low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
+  high_voltage_reference: 2.4V    # One of 2.4V, 2.5V, 2.6V, 2.7V. Default is 2.7V.
+  voltage_attenuation: 0V    # One of 1.5V, 1V, 0.5V, 0V. Default is 0V.
   
 one_wire:
   - platform: gpio
@@ -63,18 +66,25 @@ binary_sensor:
     id: "esp32touchpad"
 #    pin: GPIO33
     pin: GPIO14
-    threshold: 1700
+    threshold: 2000
     
 sensor:
   - platform: dallas_temp
-#    address: 0x3cb3637f0e64ff28
+#    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 0
     name: temp1
     update_interval: 300s
   - platform: dallas_temp
-#    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 1
     name: temp2
+    update_interval: 300s
+  - platform: dallas_temp
+    index: 2
+    name: temp3
+    update_interval: 300s
+  - platform: dallas_temp
+    index: 3
+    name: temp4
     update_interval: 300s
   - platform: template
     name: "Raw touch value"
