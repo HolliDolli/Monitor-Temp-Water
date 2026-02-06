@@ -90,7 +90,7 @@ binary_sensor:
     name: "esp32touchpad"
     id: "esp32touchpad"
     pin: GPIO14
-    threshold: 2000
+    threshold: 350
 
   - platform: homeassistant
     id: prevent_deep_sleep
@@ -154,7 +154,7 @@ interval:
 
 deep_sleep:
   run_duration: 70sec
-  sleep_duration: 5min
+  sleep_duration: 70sec
   id: deep_sleep_1
   wakeup_pin: 
     number: GPIO04
