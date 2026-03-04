@@ -10,7 +10,15 @@ esphome:
     then:
       - logger.log: 'HTMon boot triggered'
       - switch.turn_on: LEDint
-      - script.execute: consider_deep_sleep
+# hier tauschen wenn deepsleep aktiviert werden soll, und unten bei interval
+#      - script.execute: consider_deep_sleep
+      - deep_sleep.prevent: deep_sleep_1
+      - logger.log: "Boot: Mischer wird komplett zugefahren"
+      - switch.turn_on: mischer_zu
+      - delay: 125000ms   # 125s um sicher am Anschlag zu sein
+      - switch.turn_off: mischer_zu
+      - lambda: id(mischer_position_ms) = 0;
+      - logger.log: "Boot: Mischer ist ganz zu, Position = 0"
   on_shutdown:
     priority: -100.0
     then:
@@ -45,7 +53,6 @@ ota:
 # Achtung: Für Offlinekalender muss der API-Reboot auf 0s gesetzt werden, da die Tonne sonst alle 15 Minuten neu startet.
 #
 api:
-  password: ""
   reboot_timeout: 60min  # only enable this when creating an offline device; 0s=never reboot
 
 
@@ -56,6 +63,241 @@ time:
 sun:
   latitude: 51.14°
   longitude: 9.414°
+  
+globals:
+  - id: vl_h0
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h1
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h2
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h3
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h4
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h5
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h6
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h7
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h8
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h9
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h10
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h11
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_idx
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: letzte_fahrtrichtung
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: puffer_gefuellt
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: mischer_position_ms
+    type: int
+    restore_value: false
+    initial_value: '0'  # 0 = ganz zu, 120000 = ganz auf
+  - id: letzte_prioritaet
+    type: int
+    restore_value: false
+    initial_value: '0'  # 0 = nichts zu tun
+
+
+
+number:
+  - platform: template
+    name: "Override Schrittweite ms"
+    id: override_schrittweite
+    min_value: 500
+    max_value: 30000
+    step: 500
+    initial_value: 3000
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "ms"
+
+  - platform: template
+    name: "Trend Schwelle"
+    id: trend_schwelle
+    min_value: 0.1
+    max_value: 2.0
+    step: 0.1
+    initial_value: 0.5
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C/3min"
+
+  # Stützpunkt 1
+  - platform: template
+    name: "HK Stützpunkt 1 AT"
+    id: sp1_at
+    min_value: -25.0
+    max_value: 20.0
+    step: 0.5
+    initial_value: -20.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HK Stützpunkt 1 VL"
+    id: sp1_vl
+    min_value: 20.0
+    max_value: 80.0
+    step: 0.5
+    initial_value: 70.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  # Stützpunkt 2
+  - platform: template
+    name: "HK Stützpunkt 2 AT"
+    id: sp2_at
+    min_value: -25.0
+    max_value: 20.0
+    step: 0.5
+    initial_value: -10.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HK Stützpunkt 2 VL"
+    id: sp2_vl
+    min_value: 20.0
+    max_value: 80.0
+    step: 0.5
+    initial_value: 60.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  # Stützpunkt 3
+  - platform: template
+    name: "HK Stützpunkt 3 AT"
+    id: sp3_at
+    min_value: -25.0
+    max_value: 20.0
+    step: 0.5
+    initial_value: -5.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HK Stützpunkt 3 VL"
+    id: sp3_vl
+    min_value: 20.0
+    max_value: 80.0
+    step: 0.5
+    initial_value: 52.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  # Stützpunkt 4
+  - platform: template
+    name: "HK Stützpunkt 4 AT"
+    id: sp4_at
+    min_value: -25.0
+    max_value: 20.0
+    step: 0.5
+    initial_value: 0.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HK Stützpunkt 4 VL"
+    id: sp4_vl
+    min_value: 20.0
+    max_value: 80.0
+    step: 0.5
+    initial_value: 45.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  # Stützpunkt 5
+  - platform: template
+    name: "HK Stützpunkt 5 AT"
+    id: sp5_at
+    min_value: -25.0
+    max_value: 20.0
+    step: 0.5
+    initial_value: 8.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HK Stützpunkt 5 VL"
+    id: sp5_vl
+    min_value: 20.0
+    max_value: 80.0
+    step: 0.5
+    initial_value: 37.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  # Stützpunkt 6
+  - platform: template
+    name: "HK Stützpunkt 6 AT"
+    id: sp6_at
+    min_value: -25.0
+    max_value: 20.0
+    step: 0.5
+    initial_value: 15.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HK Stützpunkt 6 VL"
+    id: sp6_vl
+    min_value: 20.0
+    max_value: 80.0
+    step: 0.5
+    initial_value: 30.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+ 
   
 esp32_touch:
   setup_mode: false  
@@ -80,6 +322,60 @@ switch:
     output: "GPLEDint"
     inverted: true
     restore_mode: ALWAYS_ON
+  - platform: gpio
+    pin: 32
+    name: "Mischer Auf"
+    id: mischer_auf
+    interlock: [mischer_zu]
+    interlock_wait_time: 200ms
+
+  - platform: gpio
+    pin: 33
+    name: "Mischer Zu"
+    id: mischer_zu
+    interlock: [mischer_auf]
+    interlock_wait_time: 200ms
+
+  - platform: template
+    name: "Mischer Override aktiv"
+    id: override_aktiv
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - script.stop: regelung
+      - script.stop: fahre_auf
+      - script.stop: fahre_zu
+      - switch.turn_off: mischer_auf
+      - switch.turn_off: mischer_zu
+      - logger.log: "Override aktiviert – Automatik gestoppt"
+    on_turn_off:
+      - logger.log: "Override deaktiviert – Automatik läuft wieder"
+
+select:
+  - platform: template
+    name: "Mischer Override Richtung"
+    id: override_richtung
+    optimistic: true
+    options:
+      - "STOP"
+      - "AUF"
+      - "ZU"
+    initial_option: "STOP"
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(override_aktiv).state) return;
+            auto val = id(override_richtung).current_option();
+            if (val == "AUF") {
+              id(fahre_auf).execute();
+            } else if (val == "ZU") {
+              id(fahre_zu).execute();
+            } else {
+              id(mischer_auf).turn_off();
+              id(mischer_zu).turn_off();
+            }
+
   
 text_sensor:
   - platform: version
@@ -99,24 +395,38 @@ binary_sensor:
     entity_id: input_boolean.gk_heizung_prevent_deepsleep
     on_state: 
       - script.execute: consider_deep_sleep
+
+  - platform: template
+    name: "Mischer Anschlag ZU"
+    id: anschlag_zu
+    lambda: return id(mischer_position_ms) <= 0;
+
+  - platform: template
+    name: "Mischer Anschlag AUF"
+    id: anschlag_auf
+    lambda: return id(mischer_position_ms) >= 120000;
     
 sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle 30sek ausgeführt.
   - platform: dallas_temp
 #    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 0
-    name: temp1
+    name: Ruecklauf
+    id: ruecklauf 
     update_interval: 30s
   - platform: dallas_temp
     index: 1
-    name: temp2
+    name: RaumTemp
+    id: raumtemp 
     update_interval: 30s
   - platform: dallas_temp
     index: 2
-    name: temp3
+    name: Zulauf
+    id: zulauf 
     update_interval: 30s
   - platform: dallas_temp
     index: 3
-    name: temp4
+    name: Vorlauf
+    id: vorlauf 
     update_interval: 30s
   - platform: template
     name: "Raw touch value"
@@ -125,6 +435,90 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
     lambda: |-
         return id(esp32touchpad).get_value();
     update_interval: 30s
+  - platform: homeassistant
+    name: "Außentemperatur"
+    entity_id: sensor.tempext
+    id: aussentemp
+  - platform: template
+    name: "VL-RL Differenz"
+    id: vl_rl_diff
+    unit_of_measurement: "°C"
+    update_interval: 15s
+    lambda: |-
+      if (isnan(id(vorlauf).state) || isnan(id(ruecklauf).state)) return NAN;
+      return id(vorlauf).state - id(ruecklauf).state;
+
+  - platform: template
+    name: "Heizkurve Sollvorlauf"
+    id: soll_vorlauf
+    unit_of_measurement: "°C"
+    update_interval: 30s
+    lambda: |-
+      if (isnan(id(aussentemp).state)) return NAN;
+      float at = id(aussentemp).state;
+
+      float kurve[6][2] = {
+        {id(sp1_at).state, id(sp1_vl).state},
+        {id(sp2_at).state, id(sp2_vl).state},
+        {id(sp3_at).state, id(sp3_vl).state},
+        {id(sp4_at).state, id(sp4_vl).state},
+        {id(sp5_at).state, id(sp5_vl).state},
+        {id(sp6_at).state, id(sp6_vl).state},
+      };
+
+      if (at <= kurve[0][0]) return kurve[0][1];
+      if (at >= kurve[5][0]) return kurve[5][1];
+
+      for (int i = 0; i < 5; i++) {
+        if (at >= kurve[i][0] && at <= kurve[i+1][0]) {
+          float t = (at - kurve[i][0]) / (kurve[i+1][0] - kurve[i][0]);
+          return kurve[i][1] + t * (kurve[i+1][1] - kurve[i][1]);
+        }
+      }
+      return NAN;
+
+  - platform: template
+    name: "Vorlauf Trend"
+    id: vl_trend
+    unit_of_measurement: "°C/3min"
+    update_interval: 15s
+    lambda: |-
+      if (id(puffer_gefuellt) < 12) return NAN;
+      float werte[12] = {
+        id(vl_h0),  id(vl_h1),  id(vl_h2),
+        id(vl_h3),  id(vl_h4),  id(vl_h5),
+        id(vl_h6),  id(vl_h7),  id(vl_h8),
+        id(vl_h9),  id(vl_h10), id(vl_h11)
+      };
+      int idx = id(vl_idx);
+      float aeltester = werte[(idx + 1) % 12];
+      float neuester  = werte[idx];
+      return neuester - aeltester;
+
+  - platform: template
+    name: "Mischer Position"
+    id: mischer_position
+    unit_of_measurement: "%"
+    update_interval: 15s
+    lambda: |-
+      return (float)id(mischer_position_ms) / 1200.0;
+
+  - platform: template
+    name: "Mischer Anschlag"
+    id: mischer_anschlag
+    update_interval: 15s
+    lambda: |-
+      int pos = id(mischer_position_ms);
+      if (pos <= 0) return 1.0;    // Anschlag ZU
+      if (pos >= 120000) return 2.0; // Anschlag AUF
+      return 0.0;                   // frei
+
+  - platform: template
+    name: "Mischer Letzte Priorität"
+    id: mischer_letzte_prioritaet
+    update_interval: 15s
+    lambda: |-
+      return id(letzte_prioritaet);
     
 script:
   - id: consider_deep_sleep
@@ -146,11 +540,157 @@ script:
           else:  
             - logger.log: 'Skipping sleep, per no api connection'
             - deep_sleep.prevent: deep_sleep_1
-            
+
+  - id: fahre_zu
+    mode: single
+    then:
+      - lambda: |-
+          if (id(mischer_position_ms) <= 0) {
+            ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
+            return;
+          }
+          int ms = id(override_aktiv).state
+                   ? (int)id(override_schrittweite).state
+                   : 3000;
+          id(mischer_auf).turn_off();
+          id(mischer_zu).turn_on();
+          esphome::delay(ms);
+          id(mischer_zu).turn_off();
+          id(mischer_position_ms) = max(0, id(mischer_position_ms) - ms);
+          id(letzte_fahrtrichtung) = -1;
+
+  - id: fahre_auf
+    mode: single
+    then:
+      - lambda: |-
+          if (id(mischer_position_ms) >= 120000) {
+            ESP_LOGW("mischer", "Anschlag AUF erreicht, fahre nicht weiter");
+            return;
+          }
+          int ms = id(override_aktiv).state
+                   ? (int)id(override_schrittweite).state
+                   : 3000;
+          id(mischer_zu).turn_off();
+          id(mischer_auf).turn_on();
+          esphome::delay(ms);
+          id(mischer_auf).turn_off();
+          id(mischer_position_ms) = min(120000, id(mischer_position_ms) + ms);
+          id(letzte_fahrtrichtung) = 1;      
+      
+  - id: puffer_schreiben
+    mode: single
+    then:
+      - lambda: |-
+          if (isnan(id(vorlauf).state)) return;
+          int idx = id(vl_idx);
+          float val = id(vorlauf).state;
+
+          switch(idx) {
+            case  0: id(vl_h0)  = val; break;
+            case  1: id(vl_h1)  = val; break;
+            case  2: id(vl_h2)  = val; break;
+            case  3: id(vl_h3)  = val; break;
+            case  4: id(vl_h4)  = val; break;
+            case  5: id(vl_h5)  = val; break;
+            case  6: id(vl_h6)  = val; break;
+            case  7: id(vl_h7)  = val; break;
+            case  8: id(vl_h8)  = val; break;
+            case  9: id(vl_h9)  = val; break;
+            case 10: id(vl_h10) = val; break;
+            case 11: id(vl_h11) = val; break;
+          }
+          id(vl_idx) = (idx + 1) % 12;
+          if (id(puffer_gefuellt) < 12)
+            id(puffer_gefuellt) = id(puffer_gefuellt) + 1;
+
+  - id: regelung
+    mode: single
+    then:
+      - lambda: |-
+          if (id(override_aktiv).state) return;
+          if (isnan(id(vorlauf).state) || isnan(id(ruecklauf).state)) return;
+          if (isnan(id(soll_vorlauf).state)) return;
+
+          float vl        = id(vorlauf).state;
+          float rl        = id(ruecklauf).state;
+          float diff      = vl - rl;
+          float soll_vl   = id(soll_vorlauf).state;
+
+          float toleranz_diff = 1.0;
+          float toleranz_vl   = 1.5;
+          float ziel_diff     = 12.0;
+          float schwelle      = id(trend_schwelle).state;
+
+          // Trend berechnen (nur wenn Puffer voll)
+          float trend = 0.0;
+          bool trend_verfuegbar = id(puffer_gefuellt) >= 12;
+          if (trend_verfuegbar) {
+            float werte[12] = {
+              id(vl_h0),  id(vl_h1),  id(vl_h2),
+              id(vl_h3),  id(vl_h4),  id(vl_h5),
+              id(vl_h6),  id(vl_h7),  id(vl_h8),
+              id(vl_h9),  id(vl_h10), id(vl_h11)
+            };
+            int idx   = id(vl_idx);
+            float alt = werte[(idx + 1) % 12];
+            float neu = werte[idx];
+            trend     = neu - alt;
+          }
+
+          // PRIORITÄT 1: Vorlauf über Sollwert
+          if (vl > soll_vl + toleranz_vl) {
+            if (trend_verfuegbar && trend < -schwelle) {
+              id(letzte_prioritaet) = 10;  // P1 abwarten
+              return;
+            }
+            id(letzte_prioritaet) = 1;
+            if (!id(fahre_zu).is_running()) id(fahre_zu).execute();
+            return;
+          }
+
+          // PRIORITÄT 2: Differenz zu klein
+          if (diff < (ziel_diff - toleranz_diff)) {
+            if (trend_verfuegbar && trend < -schwelle) {
+              id(letzte_prioritaet) = 20;  // P2 abwarten
+              return;
+            }
+            id(letzte_prioritaet) = 2;
+            if (!id(fahre_zu).is_running()) id(fahre_zu).execute();
+            return;
+          }
+
+          // PRIORITÄT 3: Differenz zu groß UND Vorlauf unter Sollwert
+          if (diff > (ziel_diff + toleranz_diff) && vl < soll_vl - toleranz_vl) {
+            if (trend_verfuegbar && trend > schwelle) {
+              id(letzte_prioritaet) = 30;  // P3 abwarten
+              return;
+            }
+            id(letzte_prioritaet) = 3;
+            if (!id(fahre_auf).is_running()) id(fahre_auf).execute();
+            return;
+          }
+
+          // PRIORITÄT 4: Differenz zu groß, VL im Soll
+          if (diff > (ziel_diff + toleranz_diff)) {
+            if (trend_verfuegbar && trend < -schwelle) {
+              id(letzte_prioritaet) = 40;  // P4 abwarten
+              return;
+            }
+            id(letzte_prioritaet) = 4;
+            if (!id(fahre_zu).is_running()) id(fahre_zu).execute();
+            return;
+          }
+
+          id(letzte_prioritaet) = 0;  // alles im Toleranzband
+
 interval:
   - interval: 10s
     then:
-      - script.execute: consider_deep_sleep
+#      - script.execute: consider_deep_sleep
+  - interval: 15s
+    then:
+      - script.execute: puffer_schreiben
+      - script.execute: regelung
 
 deep_sleep:
   run_duration: 70sec
