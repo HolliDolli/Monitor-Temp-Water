@@ -12,7 +12,6 @@ esphome:
       - switch.turn_on: LEDint
 # Mischer init 
       - logger.log: "Boot: Mischer wird komplett zugefahren"
-      # Mischer über Aktor über HA steuern
       - wait_until:
           api.connected:
       - delay: 5000ms
@@ -26,10 +25,6 @@ esphome:
           service: cover.stop_cover
           data:
             entity_id: cover.0xa4c138291f9e9327
-      # Mischer über GPIO steuern         
-      #- switch.turn_on: mischer_zu
-      #- delay: 125000ms   # 125s um sicher am Anschlag zu sein
-      #- switch.turn_off: mischer_zu
       - lambda: id(mischer_position_ms) = 0;
       - lambda: id(boot_fertig) = true;
       - logger.log: "Boot: Mischer ist ganz zu, Position = 0"
@@ -707,16 +702,9 @@ script:
           int ms = id(override_aktiv).state
                    ? (int)id(override_schrittweite).state
                    : 3000;
-          // Mischer über Aktor über HA steuern
           id(ha_mischer_zu).execute();
           esphome::delay(ms);
           id(ha_mischer_stop).execute();                   
-          /*  Mischer über GPIO steuern         
-          id(mischer_auf).turn_off();
-          id(mischer_zu).turn_on();
-          esphome::delay(ms);
-          id(mischer_zu).turn_off();
-          */
           id(mischer_position_ms) = max(0, id(mischer_position_ms) - ms);
           id(letzte_fahrtrichtung) = -1;
 
@@ -731,16 +719,9 @@ script:
           int ms = id(override_aktiv).state
                    ? (int)id(override_schrittweite).state
                    : 3000;
-          // Aktor über HA steuern
           id(ha_mischer_auf).execute();
           esphome::delay(ms);
           id(ha_mischer_stop).execute();                   
-          /*  Mischer über GPIO steuern         
-          id(mischer_zu).turn_off();
-          id(mischer_auf).turn_on();
-          esphome::delay(ms);
-          id(mischer_auf).turn_off();
-          */
           id(mischer_position_ms) = min(120000, id(mischer_position_ms) + ms);
           id(letzte_fahrtrichtung) = 1;      
  
