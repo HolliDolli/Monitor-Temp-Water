@@ -10,14 +10,12 @@ esphome:
     then:
       - logger.log: 'HTMon boot triggered'
       - switch.turn_on: LEDint
-# hier tauschen wenn deepsleep aktiviert werden soll, und unten bei interval
-#      - script.execute: consider_deep_sleep
-      - deep_sleep.prevent: deep_sleep_1
 # Mischer init 
       - logger.log: "Boot: Mischer wird komplett zugefahren"
       # Mischer über Aktor über HA steuern
       - wait_until:
           api.connected:
+      - delay: 5000ms
       - logger.log: "API verbunden, fahre Mischer zu"
       - homeassistant.service:
           service: cover.close_cover
@@ -33,6 +31,7 @@ esphome:
       #- delay: 125000ms   # 125s um sicher am Anschlag zu sein
       #- switch.turn_off: mischer_zu
       - lambda: id(mischer_position_ms) = 0;
+      - lambda: id(boot_fertig) = true;
       - logger.log: "Boot: Mischer ist ganz zu, Position = 0"
   on_shutdown:
     priority: -100.0
@@ -160,8 +159,30 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
-
-
+  - id: pid_impuls_ms
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: boot_fertig
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: soll_vl_korrigiert
+    type: float
+    restore_value: false
+    initial_value: '0.0'  
+  - id: zl_prev1
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: zl_prev2
+    type: float
+    restore_value: false
+    initial_value: '0.0'    
+  - id: anschlag_kalibriert
+    type: bool
+    restore_value: false
+    initial_value: 'false'  
 number:
   - platform: template
     name: "Override Schrittweite ms"
@@ -370,9 +391,9 @@ number:
     name: "PID Ki"
     id: pid_ki
     min_value: 0.0
-    max_value: 0.5
-    step: 0.05
-    initial_value: 0.01
+    max_value: 0.01
+    step: 0.001
+    initial_value: 0.005
     optimistic: true
     restore_value: true
 
@@ -382,7 +403,7 @@ number:
     min_value: 0.0
     max_value: 2.0
     step: 0.05
-    initial_value: 0.1
+    initial_value: 0.3
     optimistic: true
     restore_value: true
   
@@ -394,7 +415,6 @@ esp32_touch:
   
 one_wire:
   - platform: gpio
-#    pin: GPIO27
     pin: GPIO26
 
 output:
@@ -409,6 +429,9 @@ switch:
     output: "GPLEDint"
     inverted: true
     restore_mode: ALWAYS_ON
+  - platform: restart
+    name: "Monitor-TW Restart" 
+    
   - platform: gpio
     pin: 32
     name: "Mischer Auf"
@@ -469,19 +492,15 @@ text_sensor:
     name: "ESPHome Version"
 
 binary_sensor:
+  - platform: status
+    name: "Statussensor"
+    id: statussensor
+    
   - platform: esp32_touch
     name: "esp32touchpad"
     id: "esp32touchpad"
     pin: GPIO14
-    threshold: 350
-
-  - platform: homeassistant
-    id: prevent_deep_sleep
-    name: Prevent Deep Sleep
-    disabled_by_default: false
-    entity_id: input_boolean.gk_heizung_prevent_deepsleep
-    on_state: 
-      - script.execute: consider_deep_sleep
+    threshold: 290
 
   - platform: template
     name: "Mischer Anschlag ZU"
@@ -492,29 +511,48 @@ binary_sensor:
     name: "Mischer Anschlag AUF"
     id: anschlag_auf
     lambda: return id(mischer_position_ms) >= 120000;
-    
-sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle 30sek ausgeführt.
+ 
+  - platform: homeassistant
+    id: ventil_offen
+    entity_id: binary_sensor.heizung_mindestens_ein_ventil_offen
+
+ 
+sensor:  
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: copy # Reports the WiFi signal strength in %
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: "diagnostic"
+    device_class: ""
   - platform: dallas_temp
 #    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 0
     name: Ruecklauf
     id: ruecklauf 
-    update_interval: 30s
+    update_interval: never
   - platform: dallas_temp
     index: 1
     name: RaumTemp
     id: raumtemp 
-    update_interval: 30s
+    update_interval: never
   - platform: dallas_temp
     index: 2
     name: Zulauf
     id: zulauf 
-    update_interval: 30s
+    update_interval: never
   - platform: dallas_temp
     index: 3
     name: Vorlauf
     id: vorlauf 
-    update_interval: 30s
+    update_interval: never
   - platform: template
     name: "Raw touch value"
     device_class: "frequency"
@@ -530,7 +568,7 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
     name: "VL-RL Differenz"
     id: vl_rl_diff
     unit_of_measurement: "°C"
-    update_interval: 15s
+    update_interval: never
     lambda: |-
       if (isnan(id(vorlauf).state) || isnan(id(ruecklauf).state)) return NAN;
       return id(vorlauf).state - id(ruecklauf).state;
@@ -539,7 +577,7 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
     name: "Heizkurve Sollvorlauf"
     id: soll_vorlauf
     unit_of_measurement: "°C"
-    update_interval: 30s
+    update_interval: never
     lambda: |-
       if (isnan(id(aussentemp).state)) return NAN;
       float at = id(aussentemp).state;
@@ -568,7 +606,7 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
     name: "Vorlauf Trend"
     id: vl_trend
     unit_of_measurement: "°C/3min"
-    update_interval: 15s
+    update_interval: never
     lambda: |-
       if (id(puffer_gefuellt) < 12) return NAN;
       float werte[12] = {
@@ -586,14 +624,14 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
     name: "Mischer Position"
     id: mischer_position
     unit_of_measurement: "%"
-    update_interval: 15s
+    update_interval: never
     lambda: |-
       return (float)id(mischer_position_ms) / 1200.0;
 
   - platform: template
     name: "Mischer Anschlag"
     id: mischer_anschlag
-    update_interval: 15s
+    update_interval: never
     lambda: |-
       int pos = id(mischer_position_ms);
       if (pos <= 0) return 1.0;    // Anschlag ZU
@@ -603,7 +641,7 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
   - platform: template
     name: "Mischer Letzte Priorität"
     id: mischer_letzte_prioritaet
-    update_interval: 15s
+    update_interval: never
     lambda: |-
       return id(letzte_prioritaet);
   
@@ -611,30 +649,27 @@ sensor:  # Bedingt durch den Deep-sleep werden die Messungen nicht wirklich alle
     name: "PID Ausgang"
     id: pid_ausgang_sensor
     unit_of_measurement: "°C"
-    update_interval: 15s
+    update_interval: never
     lambda: return id(pid_letzter_ausgang);
+
+  - platform: template
+    name: "Sollvorlauf korrigiert"
+    id: sollvorlauf_korrigiert
+    unit_of_measurement: "°C"
+    update_interval: never
+    lambda: return id(soll_vl_korrigiert);
+
+  - platform: template
+    name: "Zulauf Trend"
+    id: zl_trend_sensor
+    unit_of_measurement: "°C/min"
+    update_interval: never
+    lambda: |-
+      if (id(zl_prev2) == 0.0f) return NAN;
+      return (id(zulauf).state - id(zl_prev2)) * 2.0f;  // °C/min bei 30s Fenster
+
   
 script:
-  - id: consider_deep_sleep
-    mode: restart
-    then:
-      - if:
-          condition:
-            api.connected:
-          then:
-            - if:
-                condition:
-                  binary_sensor.is_off: prevent_deep_sleep
-                then:
-                  - logger.log: 'Allowing sleep, per prevent_deep_sleep'
-                  - deep_sleep.allow: deep_sleep_1
-                else:
-                  - logger.log: 'Skipping sleep, per prevent_deep_sleep'
-                  - deep_sleep.prevent: deep_sleep_1
-          else:  
-            - logger.log: 'Skipping sleep, per no api connection'
-            - deep_sleep.prevent: deep_sleep_1
-
 
   - id: ha_mischer_zu
     mode: single
@@ -708,7 +743,34 @@ script:
           */
           id(mischer_position_ms) = min(120000, id(mischer_position_ms) + ms);
           id(letzte_fahrtrichtung) = 1;      
-      
+ 
+  - id: fahre_auf_pid
+    mode: single
+    then:
+      - homeassistant.service:
+          service: cover.open_cover
+          data:
+            entity_id: cover.0xa4c138291f9e9327
+      - delay: !lambda return id(pid_impuls_ms);
+      - homeassistant.service:
+          service: cover.stop_cover
+          data:
+            entity_id: cover.0xa4c138291f9e9327
+
+  - id: fahre_zu_pid
+    mode: single
+    then:
+      - homeassistant.service:
+          service: cover.close_cover
+          data:
+            entity_id: cover.0xa4c138291f9e9327
+      - delay: !lambda return id(pid_impuls_ms);
+      - homeassistant.service:
+          service: cover.stop_cover
+          data:
+            entity_id: cover.0xa4c138291f9e9327
+
+ 
   - id: puffer_schreiben
     mode: single
     then:
@@ -734,169 +796,216 @@ script:
           id(vl_idx) = (idx + 1) % 12;
           if (id(puffer_gefuellt) < 12)
             id(puffer_gefuellt) = id(puffer_gefuellt) + 1;
+          // Zulauf-Historie schieben
+          id(zl_prev2) = id(zl_prev1);
+          id(zl_prev1) = id(zulauf).state;
+
 
   - id: regelung
     mode: single
     then:
       - lambda: |-
+
+
           // Sicherheitschecks
+          if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der boot abgeschlossen.
           if (id(override_aktiv).state) return;
+          if (id(fahre_auf_pid).is_running()) return;  // PID-Impuls läuft noch
+          if (id(fahre_zu_pid).is_running()) return;   // PID-Impuls läuft noch
           if (isnan(id(vorlauf).state))    return;
           if (isnan(id(ruecklauf).state))  return;
           if (isnan(id(aussentemp).state)) return;
           if (isnan(id(zulauf).state))     return;
           if (isnan(id(soll_vorlauf).state)) return;
 
+          ESP_LOGI("regelung", "Sicherheitschecks beendet");
+
           float vl  = id(vorlauf).state;
           float rl  = id(ruecklauf).state;
           float at  = id(aussentemp).state;
           float zl  = id(zulauf).state;
+          if (rl > vl) rl = vl - 0.1f;
           float diff = vl - rl;
 
           // -------------------------------------------------------
-          // PRIORITÄT 1: Heizgrenze
+          // BLOCK 1: Alle Berechnungen (immer ausführen)
           // -------------------------------------------------------
-          if (at >= id(heizgrenze_at).state) {
-            id(letzte_prioritaet) = 1;
-            ESP_LOGI("regelung", "P1: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
-            id(pid_integral) = 0.0;
-            id(ha_mischer_stop).execute();
-            id(ha_mischer_zu).execute();
-            return;
-          }
 
-          // -------------------------------------------------------
-          // PRIORITÄT 2: Vorlauf-Max Schutz
-          // -------------------------------------------------------
-          if (vl >= id(vorlauf_max).state) {
-            id(letzte_prioritaet) = 2;
-            ESP_LOGW("regelung", "P2: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
-            id(pid_integral) = 0.0;
-            id(ha_mischer_stop).execute();
-            id(ha_mischer_zu).execute();
-            return;
-          }
-
-          // -------------------------------------------------------
-          // PRIORITÄT 3: Kessel-Schutz
-          // -------------------------------------------------------
-          if (zl < id(kessel_min).state) {
-            id(letzte_prioritaet) = 3;
-            ESP_LOGI("regelung", "P3: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
-            // Mischer darf ZU fahren aber nicht AUF
-            // PID-Integral einfrieren damit kein Wind-up entsteht
-            id(pid_integral) = 0.0;
-            id(ha_mischer_stop).execute();
-            return;
-          }
-
-          // -------------------------------------------------------
-          // PRIORITÄT 4+5: Heizkurve + Spreizungskorrektur
-          // -------------------------------------------------------
+          // Heizkurve + Spreizungskorrektur
           float soll_vl = id(soll_vorlauf).state;
-
-          // Spreizungskorrektur: Ziel-Spreizung 12°C, max ±5°C Korrektur
-          float ziel_spreizung  = 12.0;
-          float spreizungsfehler = diff - ziel_spreizung;
-          float spreizungskorrektur = spreizungsfehler * 0.5;  // Verstärkung 0.5
-          spreizungskorrektur = max(-5.0f, min(5.0f, spreizungskorrektur));
-          soll_vl = soll_vl - spreizungskorrektur;  // hohe Spreizung -> Soll erhöhen
-
-          ESP_LOGD("regelung", "Soll-VL=%.1f Spreizung=%.1f Korrektur=%.1f -> korr. Soll=%.1f",
-                   id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl);
-
-          // -------------------------------------------------------
-          // PRIORITÄT 6: PID mit 3-Punkt-Motor
-          // -------------------------------------------------------
-          float fehler = soll_vl - vl;  // positiv = zu kalt -> AUF
-          float dt     = 15.0;          // Regelintervall in Sekunden
+          float spreizungsfehler = diff - 12.0f;
+          float spreizungskorrektur = max(-5.0f, min(5.0f, spreizungsfehler * 0.5f));
+          soll_vl = soll_vl + spreizungskorrektur;
+          id(soll_vl_korrigiert) = soll_vl;
+          ESP_LOGD("regelung", "Soll-VL=%.1f Spreizung=%.1f Korrektur=%.1f -> korr. Soll=%.1f; Ist-VL=%.1f",
+                   id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl, vl);
 
           // PID berechnen
-          float kp = id(pid_kp).state;
-          float ki = id(pid_ki).state;
-          float kd = id(pid_kd).state;
-
-          // Integral mit Anti-Windup: nur integrieren wenn nicht am Anschlag
+          float fehler     = soll_vl - vl;
+          float dt         = 15.0f;
+          float kp         = id(pid_kp).state;
+          float ki         = id(pid_ki).state;
+          float kd         = id(pid_kd).state;
+          float ableitung  = (fehler - id(pid_letzter_fehler)) / dt;
           bool am_anschlag_auf = id(mischer_position_ms) >= 120000;
           bool am_anschlag_zu  = id(mischer_position_ms) <= 0;
-          bool windup_schutz   = (fehler > 0 && am_anschlag_auf) ||
-                                 (fehler < 0 && am_anschlag_zu);
+
+          if ((fehler > 0) != (id(pid_letzter_fehler) > 0)) {
+            ESP_LOGD("regelung", "Fehler-Vorzeichen gewechselt, Integral reset");
+            id(pid_integral) = 0.0f;
+          }
+          bool windup_schutz = (fehler > 0 && am_anschlag_auf) ||
+                               (fehler < 0 && am_anschlag_zu);
           if (!windup_schutz) {
             id(pid_integral) = id(pid_integral) + fehler * dt;
           }
-          // Integral begrenzen
-          id(pid_integral) = max(-500.0f, min(500.0f, id(pid_integral)));
+          id(pid_integral) = max(-100.0f, min(100.0f, id(pid_integral)));
 
-          float ableitung = (fehler - id(pid_letzter_fehler)) / dt;
-          float ausgang   = kp * fehler
-                          + ki * id(pid_integral)
-                          + kd * ableitung;
+          float ausgang = kp * fehler
+                        + ki * id(pid_integral)
+                        + kd * ableitung;
 
-          id(pid_letzter_fehler)  = fehler;
-          id(pid_letzter_ausgang) = ausgang;
+          id(pid_letzter_fehler) = fehler;
 
-          ESP_LOGD("regelung", "PID: fehler=%.2f integral=%.2f ausgang=%.2f", 
+          ESP_LOGD("regelung", "PID: fehler=%.2f integral=%.2f ausgang=%.2f",
                    fehler, id(pid_integral), ausgang);
 
-          // Totband: kein Schaltimpuls wenn Ausgang klein genug
-          float totband = 1.0;
-          if (abs(ausgang) < totband) {
-            id(letzte_prioritaet) = 60;  // PID im Totband
-            ESP_LOGD("regelung", "PID im Totband (%.2f) -> nichts tun", ausgang);
+          // Feedforward
+          if (id(zl_prev2) > 0.0f) {
+            float zl_trend = (id(zulauf).state - id(zl_prev2)) * 2.0f;
+            if (zl_trend > 0.5f) {
+              float ff = min(zl_trend * 0.5f, 3.0f);
+              ausgang = ausgang - ff;
+              ESP_LOGD("regelung", "Feedforward: ZL-Trend=%.2f FF=%.2f -> Ausgang=%.2f",
+                       zl_trend, ff, ausgang);
+            }
+          }
+          id(pid_letzter_ausgang) = ausgang;
+          
+          // Impulslänge aus PID-Ausgang berechnen
+          int impuls_ms = (int)(abs(ausgang) * 1000.0f);
+          impuls_ms     = max(500, min(10000, impuls_ms));
+
+          ESP_LOGI("regelung", "Berechnungen abgeschlossen");
+
+          // -------------------------------------------------------
+          // BLOCK 2: Prioritäten und Aktionen
+          // -------------------------------------------------------
+
+          // PRIORITÄT 0: Alle Ventile geschlossen
+          if (!id(ventil_offen).state) {
+            id(letzte_prioritaet) = 0;
+            ESP_LOGI("regelung", "P0: Alle Ventile zu -> Regelung pausiert");
+            id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             return;
           }
 
-          // Impulslänge proportional zum PID-Ausgang (max 10s pro Zyklus)
-          int impuls_ms = (int)(abs(ausgang) * 1000.0);
-          impuls_ms     = max(500, min(10000, impuls_ms));
+          // PRIORITÄT 1: Heizgrenze
+          if (at >= id(heizgrenze_at).state) {
+            id(letzte_prioritaet) = 1;
+            ESP_LOGI("regelung", "P1: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
+            id(pid_integral) = 0.0f;
+            id(ha_mischer_stop).execute();
+            id(ha_mischer_zu).execute();
+            return;
+          }
+
+          // PRIORITÄT 2: Vorlauf-Max Schutz
+          if (vl >= id(vorlauf_max).state) {
+            id(letzte_prioritaet) = 2;
+            ESP_LOGW("regelung", "P2: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
+            id(pid_integral) = 0.0f;
+            id(ha_mischer_stop).execute();
+            id(ha_mischer_zu).execute();
+            return;
+          }
+
+          // PRIORITÄT 3: Kessel-Schutz
+          if (zl < id(kessel_min).state) {
+            id(letzte_prioritaet) = 3;
+            ESP_LOGW("regelung", "P3: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
+            id(pid_integral) = 0.0f;
+            id(ha_mischer_stop).execute();
+            return;
+          }
+
+          // PRIORITÄT 4+5: PID Aktion
+          float totband = 1.0f;
+          if (abs(ausgang) < totband) {
+            id(letzte_prioritaet) = 60;
+            ESP_LOGI("regelung", "PID im Totband (%.2f) -> nichts tun", ausgang);
+            id(ha_mischer_stop).execute();
+            return;
+          }
 
           if (ausgang > 0) {
-            // Zu kalt -> AUF
             if (am_anschlag_auf) {
-              ESP_LOGW("regelung", "PID will AUF aber Anschlag erreicht");
-              id(letzte_prioritaet) = 61;
+              id(letzte_prioritaet) = 41;
+              if (!id(anschlag_kalibriert)) {
+                ESP_LOGI("regelung", "PID will AUF, Anschlag -> Kalibrierung");
+                id(anschlag_kalibriert) = true;
+                id(mischer_position_ms) = 120000;
+                id(pid_impuls_ms) = 125000;
+                id(fahre_auf_pid).execute();
+              } else {
+                ESP_LOGI("regelung", "PID will AUF aber Anschlag bereits kalibriert");
+              }
               return;
             }
-            id(letzte_prioritaet) = 6;
+            id(letzte_prioritaet) = 4;
             ESP_LOGI("regelung", "PID: AUF für %dms (ausgang=%.2f)", impuls_ms, ausgang);
+            id(anschlag_kalibriert) = false;  // ← neu
             id(mischer_position_ms) = min(120000, id(mischer_position_ms) + impuls_ms);
-            id(ha_mischer_auf).execute();
-            esphome::delay(impuls_ms);
-            id(ha_mischer_stop).execute();
+            id(pid_impuls_ms) = impuls_ms;
+            id(fahre_auf_pid).execute();
           } else {
-            // Zu warm -> ZU
             if (am_anschlag_zu) {
-              ESP_LOGW("regelung", "PID will ZU aber Anschlag erreicht");
-              id(letzte_prioritaet) = 62;
+              id(letzte_prioritaet) = 51;
+              if (!id(anschlag_kalibriert)) {
+                ESP_LOGI("regelung", "PID will ZU, Anschlag -> Kalibrierung");
+                id(anschlag_kalibriert) = true;
+                id(mischer_position_ms) = 0;
+                id(pid_impuls_ms) = 125000;
+                id(fahre_zu_pid).execute();
+              } else {
+                ESP_LOGI("regelung", "PID will ZU aber Anschlag bereits kalibriert");
+              }
               return;
             }
-            id(letzte_prioritaet) = 6;
+            id(letzte_prioritaet) = 5;
             ESP_LOGI("regelung", "PID: ZU für %dms (ausgang=%.2f)", impuls_ms, ausgang);
+            id(anschlag_kalibriert) = false;  // ← neu
             id(mischer_position_ms) = max(0, id(mischer_position_ms) - impuls_ms);
-            id(ha_mischer_zu).execute();
-            esphome::delay(impuls_ms);
-            id(ha_mischer_stop).execute();
+            id(pid_impuls_ms) = impuls_ms;
+            id(fahre_zu_pid).execute();
           }
 
 interval:
-  - interval: 10s
-    then:
-#      - script.execute: consider_deep_sleep
   - interval: 15s
     then:
+      - logger.log: 'Dallas'
+      - component.update: raumtemp
+      - component.update: zulauf
+      - component.update: ruecklauf
+      - component.update: vorlauf
+      - delay: 850ms        # warten bis Dallas-Konversion fertig
+      - component.update: vl_rl_diff
+      - logger.log: 'Puffer'
       - script.execute: puffer_schreiben
+      - script.wait: puffer_schreiben
+      - logger.log: 'Trend'
+      - component.update: zl_trend_sensor
+      - component.update: vl_trend      
+      - component.update: soll_vorlauf      
+      - logger.log: 'Regelung'
       - script.execute: regelung
+      - script.wait: regelung
+      - logger.log: 'Result'
+      - component.update: mischer_letzte_prioritaet      
+      - component.update: pid_ausgang_sensor
+      - component.update: sollvorlauf_korrigiert
+      - component.update: mischer_position
+      - component.update: mischer_anschlag
 
-deep_sleep:
-  run_duration: 70sec
-  sleep_duration: 70sec
-  id: deep_sleep_1
-  wakeup_pin: 
-    number: GPIO04
-    mode:
-      input: true
-      pulldown: true
-  wakeup_pin_mode: KEEP_AWAKE
-  
-            
+
