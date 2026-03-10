@@ -10,7 +10,7 @@ esphome:
     then:
       - logger.log: 'HTMon boot triggered'
       - switch.turn_on: LEDint
-# Mischer init 
+      # Mischer init 
       - logger.log: "Boot: Mischer wird komplett zugefahren"
       - wait_until:
           api.connected:
@@ -403,7 +403,7 @@ number:
     restore_value: true
   
 esp32_touch:
-  setup_mode: false  
+  setup_mode: false    
   low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
   high_voltage_reference: 2.4V    # One of 2.4V, 2.5V, 2.6V, 2.7V. Default is 2.7V.
   voltage_attenuation: 0V    # One of 1.5V, 1V, 0.5V, 0V. Default is 0V.
@@ -495,8 +495,10 @@ binary_sensor:
     name: "esp32touchpad"
     id: "esp32touchpad"
     pin: GPIO14
-    threshold: 290
-
+    threshold: 110
+    on_press:
+      then:
+        - component.update: touch_raw_sensor
   - platform: template
     name: "Mischer Anschlag ZU"
     id: anschlag_zu
@@ -550,6 +552,7 @@ sensor:
     update_interval: never
   - platform: template
     name: "Raw touch value"
+    id: touch_raw_sensor
     device_class: "frequency"
     unit_of_measurement: "kHz"
     lambda: |-
@@ -789,15 +792,25 @@ script:
 
 
           // Sicherheitschecks
+          id(letzte_prioritaet) = 100;
           if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der boot abgeschlossen.
+          id(letzte_prioritaet) = 99;
           if (id(override_aktiv).state) return;
+          id(letzte_prioritaet) = 98;
           if (id(fahre_auf_pid).is_running()) return;  // PID-Impuls läuft noch
+          id(letzte_prioritaet) = 97;
           if (id(fahre_zu_pid).is_running()) return;   // PID-Impuls läuft noch
+          id(letzte_prioritaet) = 96;
           if (isnan(id(vorlauf).state))    return;
+          id(letzte_prioritaet) = 95;
           if (isnan(id(ruecklauf).state))  return;
+          id(letzte_prioritaet) = 94;
           if (isnan(id(aussentemp).state)) return;
+          id(letzte_prioritaet) = 93;
           if (isnan(id(zulauf).state))     return;
+          id(letzte_prioritaet) = 92;
           if (isnan(id(soll_vorlauf).state)) return;
+          id(letzte_prioritaet) = 91;
 
           ESP_LOGI("regelung", "Sicherheitschecks beendet");
 
@@ -816,10 +829,11 @@ script:
           float soll_vl = id(soll_vorlauf).state;
           float spreizungsfehler = diff - 12.0f;
           float spreizungskorrektur = max(-5.0f, min(5.0f, spreizungsfehler * 0.5f));
-          soll_vl = soll_vl + spreizungskorrektur;
+          // Wir nehmen die Spreizungskorrektur mal raus. Sinnhaftigkeit ist nicht gesichert.
+          //soll_vl = soll_vl + spreizungskorrektur;
           id(soll_vl_korrigiert) = soll_vl;
-          ESP_LOGD("regelung", "Soll-VL=%.1f Spreizung=%.1f Korrektur=%.1f -> korr. Soll=%.1f; Ist-VL=%.1f",
-                   id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl, vl);
+          ESP_LOGD("regelung", "AT=%.1f -> Soll-VL=%.1f; Spreizung=%.1f -> Korrektur=%.1f -> korr. Soll=%.1f; Ist-VL=%.1f",
+                   at, id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl, vl);
 
           // PID berechnen
           float fehler     = soll_vl - vl;
@@ -875,8 +889,8 @@ script:
 
           // PRIORITÄT 0: Alle Ventile geschlossen
           if (!id(ventil_offen).state) {
-            id(letzte_prioritaet) = 0;
-            ESP_LOGI("regelung", "P0: Alle Ventile zu -> Regelung pausiert");
+            id(letzte_prioritaet) = 80;
+            ESP_LOGI("regelung", "P80 Alle Ventile zu -> Regelung pausiert");
             id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             return;
@@ -884,8 +898,8 @@ script:
 
           // PRIORITÄT 1: Heizgrenze
           if (at >= id(heizgrenze_at).state) {
-            id(letzte_prioritaet) = 1;
-            ESP_LOGI("regelung", "P1: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
+            id(letzte_prioritaet) = 70;
+            ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
             id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             id(ha_mischer_zu).execute();
@@ -894,8 +908,8 @@ script:
 
           // PRIORITÄT 2: Vorlauf-Max Schutz
           if (vl >= id(vorlauf_max).state) {
-            id(letzte_prioritaet) = 2;
-            ESP_LOGW("regelung", "P2: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
+            id(letzte_prioritaet) = 60;
+            ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
             id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             id(ha_mischer_zu).execute();
@@ -904,8 +918,8 @@ script:
 
           // PRIORITÄT 3: Kessel-Schutz
           if (zl < id(kessel_min).state) {
-            id(letzte_prioritaet) = 3;
-            ESP_LOGW("regelung", "P3: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
+            id(letzte_prioritaet) = 50;
+            ESP_LOGW("regelung", "P50: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
             id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             return;
@@ -914,48 +928,48 @@ script:
           // PRIORITÄT 4+5: PID Aktion
           float totband = 1.0f;
           if (abs(ausgang) < totband) {
-            id(letzte_prioritaet) = 60;
-            ESP_LOGI("regelung", "PID im Totband (%.2f) -> nichts tun", ausgang);
+            id(letzte_prioritaet) = 0;
+            ESP_LOGI("regelung", "P0: PID im Totband (%.2f) -> nichts tun", ausgang);
             id(ha_mischer_stop).execute();
             return;
           }
 
           if (ausgang > 0) {
             if (am_anschlag_auf) {
-              id(letzte_prioritaet) = 41;
+              id(letzte_prioritaet) = 2;
               if (!id(anschlag_kalibriert)) {
-                ESP_LOGI("regelung", "PID will AUF, Anschlag -> Kalibrierung");
+                ESP_LOGI("regelung", "P+2: PID will AUF, Anschlag -> Kalibrierung");
                 id(anschlag_kalibriert) = true;
                 id(mischer_position_ms) = 120000;
-                id(pid_impuls_ms) = 125000;
+                id(pid_impuls_ms) = 30000; // eigentlich die vollen 120 sekunden, aber 25% sollten reichen, wir haben ja schon oft geöffnet.
                 id(fahre_auf_pid).execute();
               } else {
-                ESP_LOGI("regelung", "PID will AUF aber Anschlag bereits kalibriert");
+                ESP_LOGI("regelung", "P+2: PID will AUF aber Anschlag bereits kalibriert");
               }
               return;
             }
-            id(letzte_prioritaet) = 4;
-            ESP_LOGI("regelung", "PID: AUF für %dms (ausgang=%.2f)", impuls_ms, ausgang);
+            id(letzte_prioritaet) = 1;
+            ESP_LOGI("regelung", "P+1: PID: AUF für %dms (ausgang=%.2f)", impuls_ms, ausgang);
             id(anschlag_kalibriert) = false;  // ← neu
             id(mischer_position_ms) = min(120000, id(mischer_position_ms) + impuls_ms);
             id(pid_impuls_ms) = impuls_ms;
             id(fahre_auf_pid).execute();
           } else {
             if (am_anschlag_zu) {
-              id(letzte_prioritaet) = 51;
+              id(letzte_prioritaet) = -2;
               if (!id(anschlag_kalibriert)) {
-                ESP_LOGI("regelung", "PID will ZU, Anschlag -> Kalibrierung");
+                ESP_LOGI("regelung", "P-2: PID will ZU, Anschlag -> Kalibrierung");
                 id(anschlag_kalibriert) = true;
                 id(mischer_position_ms) = 0;
-                id(pid_impuls_ms) = 125000;
+                id(pid_impuls_ms) = 30000; // eigentlich die vollen 120 sekunden, aber 25% sollten reichen, wir haben ja schon oft geschlossen.
                 id(fahre_zu_pid).execute();
               } else {
-                ESP_LOGI("regelung", "PID will ZU aber Anschlag bereits kalibriert");
+                ESP_LOGI("regelung", "P-2: PID will ZU aber Anschlag bereits kalibriert");
               }
               return;
             }
-            id(letzte_prioritaet) = 5;
-            ESP_LOGI("regelung", "PID: ZU für %dms (ausgang=%.2f)", impuls_ms, ausgang);
+            id(letzte_prioritaet) = -1;
+            ESP_LOGI("regelung", "P-1 PID: ZU für %dms (ausgang=%.2f)", impuls_ms, ausgang);
             id(anschlag_kalibriert) = false;  // ← neu
             id(mischer_position_ms) = max(0, id(mischer_position_ms) - impuls_ms);
             id(pid_impuls_ms) = impuls_ms;
@@ -988,5 +1002,15 @@ interval:
       - component.update: sollvorlauf_korrigiert
       - component.update: mischer_position
       - component.update: mischer_anschlag
-
-
+      - homeassistant.event:
+          event: esphome.heizung_messung
+          data:
+            vorlauf: !lambda "return id(vorlauf).state;"
+            ruecklauf: !lambda "return id(ruecklauf).state;"
+            zulauf: !lambda "return id(zulauf).state;"
+            soll_vl: !lambda "return id(soll_vorlauf).state;"
+            pid_ausgang: !lambda "return id(pid_letzter_ausgang);"
+            mischer_pos: !lambda "return id(mischer_position_ms) / 1200.0;"
+            prioritaet: !lambda "return id(letzte_prioritaet);"
+            vl_rl_diff: !lambda "return id(vorlauf).state - id(ruecklauf).state;"
+            zl_trend: !lambda "return (id(zl_prev2) > 0.0f) ? (id(zulauf).state - id(zl_prev2)) * 2.0f : 0.0f;"
