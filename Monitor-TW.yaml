@@ -180,6 +180,28 @@ globals:
     restore_value: false
     initial_value: 'false'  
 number:
+
+  - platform: template
+    name: "Heizung Neigung N"
+    id: hk_neigung
+    min_value: 0.2
+    max_value: 2.0
+    step: 0.1
+    initial_value: 1.3
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Heizung Offset L"
+    id: hk_offset
+    min_value: 10.0
+    max_value: 30.0
+    step: 1.0
+    initial_value: 20.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
   - platform: template
     name: "Raumsoll"
     id: raumsoll
@@ -212,144 +234,6 @@ number:
     optimistic: true
     restore_value: true
     unit_of_measurement: "°C/3min"
-
-  # Stützpunkt 1
-  - platform: template
-    name: "HK Stützpunkt 1 AT"
-    id: sp1_at
-    min_value: -25.0
-    max_value: 20.0
-    step: 0.5
-    initial_value: -20.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HK Stützpunkt 1 VL"
-    id: sp1_vl
-    min_value: 20.0
-    max_value: 80.0
-    step: 0.5
-    initial_value: 70.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  # Stützpunkt 2
-  - platform: template
-    name: "HK Stützpunkt 2 AT"
-    id: sp2_at
-    min_value: -25.0
-    max_value: 20.0
-    step: 0.5
-    initial_value: -10.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HK Stützpunkt 2 VL"
-    id: sp2_vl
-    min_value: 20.0
-    max_value: 80.0
-    step: 0.5
-    initial_value: 60.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  # Stützpunkt 3
-  - platform: template
-    name: "HK Stützpunkt 3 AT"
-    id: sp3_at
-    min_value: -25.0
-    max_value: 20.0
-    step: 0.5
-    initial_value: -5.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HK Stützpunkt 3 VL"
-    id: sp3_vl
-    min_value: 20.0
-    max_value: 80.0
-    step: 0.5
-    initial_value: 52.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  # Stützpunkt 4
-  - platform: template
-    name: "HK Stützpunkt 4 AT"
-    id: sp4_at
-    min_value: -25.0
-    max_value: 20.0
-    step: 0.5
-    initial_value: 0.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HK Stützpunkt 4 VL"
-    id: sp4_vl
-    min_value: 20.0
-    max_value: 80.0
-    step: 0.5
-    initial_value: 45.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  # Stützpunkt 5
-  - platform: template
-    name: "HK Stützpunkt 5 AT"
-    id: sp5_at
-    min_value: -25.0
-    max_value: 20.0
-    step: 0.5
-    initial_value: 8.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HK Stützpunkt 5 VL"
-    id: sp5_vl
-    min_value: 20.0
-    max_value: 80.0
-    step: 0.5
-    initial_value: 37.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  # Stützpunkt 6
-  - platform: template
-    name: "HK Stützpunkt 6 AT"
-    id: sp6_at
-    min_value: -25.0
-    max_value: 20.0
-    step: 0.5
-    initial_value: 15.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HK Stützpunkt 6 VL"
-    id: sp6_vl
-    min_value: 20.0
-    max_value: 80.0
-    step: 0.5
-    initial_value: 30.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
 
   - platform: template
     name: "Heizgrenze AT"
@@ -584,187 +468,20 @@ sensor:
       return id(vorlauf).state - id(ruecklauf).state;
 
   - platform: template
-    name: "Heizung Neigung"
-    id: heizung_neigung
-    unit_of_measurement: ""
-    accuracy_decimals: 2
-    update_interval: never
-    lambda: |-
-      // Lookup-Tabelle: [Neigung][AT-Index] -> VL
-      float neigungen[4] = {0.2f, 0.8f, 1.4f, 2.0f};
-      float at_werte[7]  = {-20.0f, -10.0f, -5.0f, 0.0f, 8.0f, 15.0f, 20.0f};
-      float tabelle[4][7] = {
-        {27, 27, 27, 26, 24, 22, 20},  // N=0.2
-        {52, 47, 44, 41, 32, 26, 20},  // N=0.8
-        {74, 67, 62, 56, 42, 32, 20},  // N=1.4
-        {97, 88, 81, 71, 52, 37, 20},  // N=2.0
-      };
-
-      // Hilfsfunktion: VL aus Tabelle für gegebene Neigung und AT (bilinear)
-      auto lookup_vl = [&](float n, float at) -> float {
-        // AT-Index finden
-        int ai = 0;
-        for (int i = 0; i < 6; i++) {
-          if (at >= at_werte[i] && at <= at_werte[i+1]) { ai = i; break; }
-          if (at < at_werte[0]) { ai = 0; }
-          if (at > at_werte[6]) { ai = 5; }
-        }
-        // Neigung-Index finden
-        int ni = 0;
-        for (int i = 0; i < 3; i++) {
-          if (n >= neigungen[i] && n <= neigungen[i+1]) { ni = i; break; }
-          if (n < neigungen[0]) { ni = 0; }
-          if (n > neigungen[3]) { ni = 2; }
-        }
-        // Bilineare Interpolation
-        float t_at = (at_werte[ai+1] != at_werte[ai])
-                     ? (at - at_werte[ai]) / (at_werte[ai+1] - at_werte[ai])
-                     : 0.0f;
-        float t_n  = (neigungen[ni+1] != neigungen[ni])
-                     ? (n - neigungen[ni]) / (neigungen[ni+1] - neigungen[ni])
-                     : 0.0f;
-        float vl00 = tabelle[ni][ai];
-        float vl10 = tabelle[ni+1][ai];
-        float vl01 = tabelle[ni][ai+1];
-        float vl11 = tabelle[ni+1][ai+1];
-        return vl00 * (1-t_n) * (1-t_at)
-             + vl10 * t_n     * (1-t_at)
-             + vl01 * (1-t_n) * t_at
-             + vl11 * t_n     * t_at;
-      };
-
-      // Stützpunkte
-      float punkte[6][2] = {
-        {id(sp1_at).state, id(sp1_vl).state},
-        {id(sp2_at).state, id(sp2_vl).state},
-        {id(sp3_at).state, id(sp3_vl).state},
-        {id(sp4_at).state, id(sp4_vl).state},
-        {id(sp5_at).state, id(sp5_vl).state},
-        {id(sp6_at).state, id(sp6_vl).state},
-      };
-
-      // Neigung suchen: kleinste N die keinen Stützpunkt unterschreitet
-      float beste_neigung = 0.2f;
-      float bester_score  = 1e9f;
-      for (int step = 0; step <= 180; step++) {
-        float n = 0.2f + step * 0.01f;  // 0.2 bis 2.0
-        bool unterschreitung = false;
-        float summe_abstand  = 0.0f;
-        for (int i = 0; i < 6; i++) {
-          float at = punkte[i][0];
-          float vl_soll = punkte[i][1];
-          float vl_kurve = lookup_vl(n, at);
-          float abstand = vl_kurve - vl_soll;
-          if (abstand < -0.1f) { unterschreitung = true; break; }
-          summe_abstand += abstand;
-        }
-        if (!unterschreitung && summe_abstand < bester_score) {
-          bester_score  = summe_abstand;
-          beste_neigung = n;
-        }
-      }
-      ESP_LOGD("neigung", "beste_neigung=%.2f bester_score=%.2f", beste_neigung, bester_score);
-      for (int i = 0; i < 6; i++) {
-        float vl_kurve = lookup_vl(beste_neigung, punkte[i][0]);
-        ESP_LOGD("neigung", "SP%d: AT=%.1f VL_soll=%.1f VL_kurve=%.1f abstand=%.1f",
-                 i+1, punkte[i][0], punkte[i][1], vl_kurve, vl_kurve - punkte[i][1]);
-      }
-      return beste_neigung;
-
-  - platform: template
-    name: "Heizung Niveau"
-    id: heizung_niveau
-    unit_of_measurement: "°C"
-    update_interval: never
-    lambda: |-
-      float neigung = id(heizung_neigung).state;
-      if (isnan(neigung)) return NAN;
-      float puffer = 5.0f;
-
-      float punkte[6][2] = {
-        {id(sp1_at).state, id(sp1_vl).state},
-        {id(sp2_at).state, id(sp2_vl).state},
-        {id(sp3_at).state, id(sp3_vl).state},
-        {id(sp4_at).state, id(sp4_vl).state},
-        {id(sp5_at).state, id(sp5_vl).state},
-        {id(sp6_at).state, id(sp6_vl).state},
-      };
-
-      // Lookup-Tabelle: [Neigung][AT-Index] -> VL
-      float neigungen[4] = {0.2f, 0.8f, 1.4f, 2.0f};
-      float at_werte[7]  = {-20.0f, -10.0f, -5.0f, 0.0f, 8.0f, 15.0f, 20.0f};
-      float tabelle[4][7] = {
-        {27, 27, 27, 26, 24, 22, 20},  // N=0.2
-        {52, 47, 44, 41, 32, 26, 20},  // N=0.8
-        {74, 67, 62, 56, 42, 32, 20},  // N=1.4
-        {97, 88, 81, 71, 52, 37, 20},  // N=2.0
-      };
-
-      auto lookup_vl = [&](float n, float at) -> float {
-        int ai = 0;
-        for (int i = 0; i < 6; i++) {
-          if (at >= at_werte[i] && at <= at_werte[i+1]) { ai = i; break; }
-          if (at < at_werte[0]) { ai = 0; }
-          if (at > at_werte[6]) { ai = 5; }
-        }
-        int ni = 0;
-        for (int i = 0; i < 3; i++) {
-          if (n >= neigungen[i] && n <= neigungen[i+1]) { ni = i; break; }
-          if (n < neigungen[0]) { ni = 0; }
-          if (n > neigungen[3]) { ni = 2; }
-        }
-        float t_at = (at_werte[ai+1] != at_werte[ai])
-                     ? (at - at_werte[ai]) / (at_werte[ai+1] - at_werte[ai])
-                     : 0.0f;
-        float t_n  = (neigungen[ni+1] != neigungen[ni])
-                     ? (n - neigungen[ni]) / (neigungen[ni+1] - neigungen[ni])
-                     : 0.0f;
-        float vl00 = tabelle[ni][ai];
-        float vl10 = tabelle[ni+1][ai];
-        float vl01 = tabelle[ni][ai+1];
-        float vl11 = tabelle[ni+1][ai+1];
-        return vl00 * (1-t_n) * (1-t_at)
-             + vl10 * t_n     * (1-t_at)
-             + vl01 * (1-t_n) * t_at
-             + vl11 * t_n     * t_at;
-      };
-
-      float max_verschiebung = 0.0f;
-      for (int i = 0; i < 6; i++) {
-        float vl_kurve = lookup_vl(neigung, punkte[i][0]);
-        float verschiebung = (punkte[i][1] + puffer) - vl_kurve;
-        if (verschiebung > max_verschiebung) max_verschiebung = verschiebung;
-      }
-      return max_verschiebung;
-
-  - platform: template
     name: "Heizkurve Sollvorlauf"
     id: soll_vorlauf
     unit_of_measurement: "°C"
     update_interval: never
     lambda: |-
       if (isnan(id(aussentemp).state)) return NAN;
-      float at = id(aussentemp).state;
-
-      float kurve[6][2] = {
-        {id(sp1_at).state, id(sp1_vl).state},
-        {id(sp2_at).state, id(sp2_vl).state},
-        {id(sp3_at).state, id(sp3_vl).state},
-        {id(sp4_at).state, id(sp4_vl).state},
-        {id(sp5_at).state, id(sp5_vl).state},
-        {id(sp6_at).state, id(sp6_vl).state},
-      };
-
-      if (at <= kurve[0][0]) return kurve[0][1];
-      if (at >= kurve[5][0]) return kurve[5][1];
-
-      for (int i = 0; i < 5; i++) {
-        if (at >= kurve[i][0] && at <= kurve[i+1][0]) {
-          float t = (at - kurve[i][0]) / (kurve[i+1][0] - kurve[i][0]);
-          return kurve[i][1] + t * (kurve[i+1][1] - kurve[i][1]);
-        }
-      }
-      return NAN;
+      float x = id(aussentemp).state;
+      float N = id(hk_neigung).state;
+      float L = id(hk_offset).state;
+      float a = -0.015625f * N;
+      float b = -0.9375f * N + 0.05f;
+      float c = 25.0f * N + 21.0f;
+      float u = (20.0f * x) / L;  // (20*x)/L
+      return a * u * u + b * u + c + (L - 20.0f);
 
   - platform: template
     name: "Vorlauf Trend"
@@ -1159,8 +876,6 @@ interval:
       - component.update: zl_trend_sensor
       - component.update: vl_trend      
       - component.update: soll_vorlauf      
-      - component.update: heizung_neigung
-      - component.update: heizung_niveau
       - logger.log: 'Regelung'
       - script.execute: regelung
       - script.wait: regelung
