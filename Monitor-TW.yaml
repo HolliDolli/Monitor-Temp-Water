@@ -203,17 +203,6 @@ number:
     unit_of_measurement: "°C"
 
   - platform: template
-    name: "Raumsoll"
-    id: raumsoll
-    min_value: 15.0
-    max_value: 25.0
-    step: 0.5
-    initial_value: 20.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C"
-
-  - platform: template
     name: "Override Schrittweite ms"
     id: override_schrittweite
     min_value: 500
