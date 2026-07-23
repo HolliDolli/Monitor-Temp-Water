@@ -11,24 +11,24 @@ esphome:
     then:
       - logger.log: 'HTMon boot triggered'
       - switch.turn_on: LEDint
-      # Mischer init 
-      - logger.log: "Boot: Mischer wird komplett zugefahren"
-      - wait_until:
-          api.connected:
-      - delay: 5000ms
-      - logger.log: "API verbunden, fahre Mischer zu"
-      - homeassistant.service:
-          service: cover.close_cover
-          data:
-            entity_id: cover.0xa4c138291f9e9327
-      - delay: 125000ms
-      - homeassistant.service:
-          service: cover.stop_cover
-          data:
-            entity_id: cover.0xa4c138291f9e9327
-      - lambda: id(mischer_position_ms) = 0;
+      # Mischer init, bruachen wir nicht mehr, haben ja jetzt echte Position
+      #- logger.log: "Boot: Mischer wird komplett zugefahren"
+      #- wait_until:
+      #    api.connected:
+      #- delay: 5000ms
+      #- logger.log: "API verbunden, fahre Mischer zu"
+      #- homeassistant.service:
+      #    service: cover.close_cover
+      #    data:
+      #      entity_id: cover.rollaktor1
+      #- delay: 125000ms
+      #- homeassistant.service:
+      #    service: cover.stop_cover
+      #    data:
+      #      entity_id: cover.rollaktor1
+      #- lambda: id(mischer_position_ms) = 0;
+      #- logger.log: "Boot: Mischer ist ganz zu, Position = 0"
       - lambda: id(boot_fertig) = true;
-      - logger.log: "Boot: Mischer ist ganz zu, Position = 0"
   on_shutdown:
     priority: -100.0
     then:
@@ -155,10 +155,6 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
-  - id: pid_impuls_ms
-    type: int
-    restore_value: false
-    initial_value: '0'
   - id: boot_fertig
     type: bool
     restore_value: false
@@ -175,10 +171,6 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'    
-  - id: anschlag_kalibriert
-    type: bool
-    restore_value: false
-    initial_value: 'false'  
 number:
 
   - platform: template
@@ -415,22 +407,25 @@ sensor:
     entity_category: "diagnostic"
     device_class: ""
   - platform: dallas_temp
-#    address: 0x7d592f7f0e64ff28 brauchen wir nicht mehr. gibt ja jetzt index :-)
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 0
     name: Ruecklauf
     id: ruecklauf 
     update_interval: never
   - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 1
     name: RaumTemp
     id: raumtemp 
     update_interval: never
   - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 2
     name: Zulauf
     id: zulauf 
     update_interval: never
   - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 3
     name: Vorlauf
     id: vorlauf 
@@ -447,6 +442,13 @@ sensor:
     name: "Außentemperatur"
     entity_id: sensor.tempext
     id: aussentemp
+
+  - platform: homeassistant   
+    name: "Rollaktor1 Position (Ist)"
+    id: rollaktor1_position_ist
+    entity_id: cover.rollaktor1
+    attribute: current_position
+
   - platform: template
     name: "VL-RL Differenz"
     id: vl_rl_diff
@@ -547,7 +549,7 @@ script:
       - homeassistant.service:
           service: cover.close_cover
           data:
-            entity_id: cover.0xa4c138291f9e9327
+            entity_id: cover.rollaktor1
 
   - id: ha_mischer_auf
     mode: single
@@ -555,7 +557,7 @@ script:
       - homeassistant.service:
           service: cover.open_cover
           data:
-            entity_id: cover.0xa4c138291f9e9327
+            entity_id: cover.rollaktor1
 
   - id: ha_mischer_stop
     mode: single
@@ -563,69 +565,60 @@ script:
       - homeassistant.service:
           service: cover.stop_cover
           data:
-            entity_id: cover.0xa4c138291f9e9327
+            entity_id: cover.rollaktor1
 
 
   - id: fahre_zu
     mode: single
     then:
       - lambda: |-
+          // fahre_zu, analog fahre_auf mit +
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
+          }
           if (id(mischer_position_ms) <= 0) {
             ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
             return;
           }
-          int ms = id(override_aktiv).state
-                   ? (int)id(override_schrittweite).state
-                   : 3000;
-          id(ha_mischer_zu).execute();
-          esphome::delay(ms);
-          id(ha_mischer_stop).execute();                   
-          id(mischer_position_ms) = max(0, id(mischer_position_ms) - ms);
+          int schritt_ms  = id(override_aktiv).state ? (int)id(override_schrittweite).state : 3000;
+          int neue_pos_ms = max(0, id(mischer_position_ms) - schritt_ms);
+          int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
+          id(mischer_fahre_position).execute(ziel_pct);
+          id(mischer_position_ms) = neue_pos_ms;
           id(letzte_fahrtrichtung) = -1;
 
   - id: fahre_auf
     mode: single
     then:
       - lambda: |-
-          if (id(mischer_position_ms) >= 120000) {
-            ESP_LOGW("mischer", "Anschlag AUF erreicht, fahre nicht weiter");
+          // fahre_zu, analog fahre_auf mit +
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
+          }
+          if (id(mischer_position_ms) <= 0) {
+            ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
             return;
           }
-          int ms = id(override_aktiv).state
-                   ? (int)id(override_schrittweite).state
-                   : 3000;
-          id(ha_mischer_auf).execute();
-          esphome::delay(ms);
-          id(ha_mischer_stop).execute();                   
-          id(mischer_position_ms) = min(120000, id(mischer_position_ms) + ms);
-          id(letzte_fahrtrichtung) = 1;      
+          int schritt_ms  = id(override_aktiv).state ? (int)id(override_schrittweite).state : 3000;
+          int neue_pos_ms = max(0, id(mischer_position_ms) + schritt_ms);
+          int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
+          id(mischer_fahre_position).execute(ziel_pct);
+          id(mischer_position_ms) = neue_pos_ms;
+          id(letzte_fahrtrichtung) = +1;
  
-  - id: fahre_auf_pid
-    mode: single
+  - id: mischer_fahre_position
+    mode: restart
+    parameters:
+      zielposition: int
     then:
       - homeassistant.service:
-          service: cover.open_cover
+          service: cover.set_cover_position
           data:
-            entity_id: cover.0xa4c138291f9e9327
-      - delay: !lambda return id(pid_impuls_ms);
-      - homeassistant.service:
-          service: cover.stop_cover
-          data:
-            entity_id: cover.0xa4c138291f9e9327
-
-  - id: fahre_zu_pid
-    mode: single
-    then:
-      - homeassistant.service:
-          service: cover.close_cover
-          data:
-            entity_id: cover.0xa4c138291f9e9327
-      - delay: !lambda return id(pid_impuls_ms);
-      - homeassistant.service:
-          service: cover.stop_cover
-          data:
-            entity_id: cover.0xa4c138291f9e9327
-
+            entity_id: cover.rollaktor1
+          variables:
+            ziel_var: !lambda 'return zielposition;'
+          data_template:
+            position: '{{ ziel_var }}'
  
   - id: puffer_schreiben
     mode: single
@@ -669,9 +662,7 @@ script:
           id(letzte_prioritaet) = 99;
           if (id(override_aktiv).state) return;
           id(letzte_prioritaet) = 98;
-          if (id(fahre_auf_pid).is_running()) return;  // PID-Impuls läuft noch
           id(letzte_prioritaet) = 97;
-          if (id(fahre_zu_pid).is_running()) return;   // PID-Impuls läuft noch
           id(letzte_prioritaet) = 96;
           if (isnan(id(vorlauf).state))    return;
           id(letzte_prioritaet) = 95;
@@ -685,6 +676,10 @@ script:
           id(letzte_prioritaet) = 91;
 
           ESP_LOGI("regelung", "Sicherheitschecks beendet");
+
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
+          }
 
           float vl  = id(vorlauf).state;
           float rl  = id(ruecklauf).state;
@@ -797,56 +792,24 @@ script:
             return;
           }
 
-          // PRIORITÄT 4+5: PID Aktion
+          // PRIORITÄT 4+5: PID Aktion -> direkte Positionsvorgabe
           float totband = 1.0f;
           if (abs(ausgang) < totband) {
             id(letzte_prioritaet) = 0;
             ESP_LOGI("regelung", "P0: PID im Totband (%.2f) -> nichts tun", ausgang);
-            id(ha_mischer_stop).execute();
             return;
           }
-
-          if (ausgang > 0) {
-            if (am_anschlag_auf) {
-              id(letzte_prioritaet) = 2;
-              if (!id(anschlag_kalibriert)) {
-                ESP_LOGI("regelung", "P+2: PID will AUF, Anschlag -> Kalibrierung");
-                id(anschlag_kalibriert) = true;
-                id(mischer_position_ms) = 120000;
-                id(pid_impuls_ms) = 30000; // eigentlich die vollen 120 sekunden, aber 25% sollten reichen, wir haben ja schon oft geöffnet.
-                id(fahre_auf_pid).execute();
-              } else {
-                ESP_LOGI("regelung", "P+2: PID will AUF aber Anschlag bereits kalibriert");
-              }
-              return;
-            }
-            id(letzte_prioritaet) = 1;
-            ESP_LOGI("regelung", "P+1: PID: AUF für %dms (ausgang=%.2f)", impuls_ms, ausgang);
-            id(anschlag_kalibriert) = false;  // ← neu
-            id(mischer_position_ms) = min(120000, id(mischer_position_ms) + impuls_ms);
-            id(pid_impuls_ms) = impuls_ms;
-            id(fahre_auf_pid).execute();
-          } else {
-            if (am_anschlag_zu) {
-              id(letzte_prioritaet) = -2;
-              if (!id(anschlag_kalibriert)) {
-                ESP_LOGI("regelung", "P-2: PID will ZU, Anschlag -> Kalibrierung");
-                id(anschlag_kalibriert) = true;
-                id(mischer_position_ms) = 0;
-                id(pid_impuls_ms) = 30000; // eigentlich die vollen 120 sekunden, aber 25% sollten reichen, wir haben ja schon oft geschlossen.
-                id(fahre_zu_pid).execute();
-              } else {
-                ESP_LOGI("regelung", "P-2: PID will ZU aber Anschlag bereits kalibriert");
-              }
-              return;
-            }
-            id(letzte_prioritaet) = -1;
-            ESP_LOGI("regelung", "P-1 PID: ZU für %dms (ausgang=%.2f)", impuls_ms, ausgang);
-            id(anschlag_kalibriert) = false;  // ← neu
-            id(mischer_position_ms) = max(0, id(mischer_position_ms) - impuls_ms);
-            id(pid_impuls_ms) = impuls_ms;
-            id(fahre_zu_pid).execute();
-          }
+          float delta_pct    = (float)impuls_ms / 1200.0f;   // ms -> Prozentpunkte, gleiche Skalierung wie bisher
+          float aktuelle_pct = id(mischer_position_ms) / 1200.0f;
+          float ziel_pct     = aktuelle_pct + (ausgang > 0 ? delta_pct : -delta_pct);
+          ziel_pct = max(0.0f, min(100.0f, ziel_pct));
+          int ziel_pct_int = (int)round(ziel_pct);
+          id(letzte_prioritaet) = (ausgang > 0) ? 1 : -1;
+          ESP_LOGI("regelung", "P%d: PID -> Zielposition %d%% (aktuell %.1f%%, ausgang=%.2f)",
+                   id(letzte_prioritaet), ziel_pct_int, aktuelle_pct, ausgang);
+          id(mischer_fahre_position).execute(ziel_pct_int);
+          id(mischer_position_ms) = ziel_pct_int * 1200;
+          id(letzte_fahrtrichtung) = (ausgang > 0) ? 1 : -1;
 
 interval:
   - interval: 15s
