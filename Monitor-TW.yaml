@@ -804,6 +804,15 @@ script:
           float ziel_pct     = aktuelle_pct + (ausgang > 0 ? delta_pct : -delta_pct);
           ziel_pct = max(0.0f, min(100.0f, ziel_pct));
           int ziel_pct_int = (int)round(ziel_pct);
+
+          float mindest_delta = 3.0f;
+          if (abs(ziel_pct_int - aktuelle_pct) < mindest_delta) {
+            id(letzte_prioritaet) = 0;
+            ESP_LOGI("regelung", "P0: Positionsänderung zu klein (%.1f%% -> %d%%) -> nichts tun",
+                     aktuelle_pct, ziel_pct_int);
+            return;
+          }
+
           id(letzte_prioritaet) = (ausgang > 0) ? 1 : -1;
           ESP_LOGI("regelung", "P%d: PID -> Zielposition %d%% (aktuell %.1f%%, ausgang=%.2f)",
                    id(letzte_prioritaet), ziel_pct_int, aktuelle_pct, ausgang);
