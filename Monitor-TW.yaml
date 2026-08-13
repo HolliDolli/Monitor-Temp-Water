@@ -745,8 +745,14 @@ script:
           id(pid_letzter_ausgang) = ausgang;
           
           // Impulslänge aus PID-Ausgang berechnen
-          int impuls_ms = (int)(abs(ausgang) * 1000.0f);
-          impuls_ms     = max(500, min(10000, impuls_ms));
+          #int impuls_ms = (int)(abs(ausgang) * 1000.0f);
+          #impuls_ms     = max(500, min(10000, impuls_ms));
+          float delta_pct = max(0.417f, min(8.33f, abs(ausgang) * 0.833f)); 
+          float aktuelle_pct = id(mischer_position_ms);
+          float ziel_pct     = aktuelle_pct + (ausgang > 0 ? delta_pct : -delta_pct);
+          ziel_pct = max(0.0f, min(100.0f, ziel_pct));
+          int ziel_pct_int = (int)round(ziel_pct);
+
 
           ESP_LOGI("regelung", "Berechnungen abgeschlossen");
 
@@ -799,11 +805,6 @@ script:
             ESP_LOGI("regelung", "P0: PID im Totband (%.2f) -> nichts tun", ausgang);
             return;
           }
-          float delta_pct    = (float)impuls_ms / 1200.0f;   // ms -> Prozentpunkte, gleiche Skalierung wie bisher
-          float aktuelle_pct = id(mischer_position_ms) / 1200.0f;
-          float ziel_pct     = aktuelle_pct + (ausgang > 0 ? delta_pct : -delta_pct);
-          ziel_pct = max(0.0f, min(100.0f, ziel_pct));
-          int ziel_pct_int = (int)round(ziel_pct);
 
           float mindest_delta = 3.0f;
           if (abs(ziel_pct_int - aktuelle_pct) < mindest_delta) {
