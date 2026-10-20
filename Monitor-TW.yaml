@@ -170,7 +170,13 @@ globals:
   - id: zl_prev2
     type: float
     restore_value: false
-    initial_value: '0.0'    
+    initial_value: '0.0'
+  # 2026-10-12 ÄNDERUNG Anfang: Zielposition des Mischers als Float in % (statt Rundung bei jedem Zyklus)
+  - id: pos_ziel
+    type: float
+    restore_value: false
+    initial_value: '60.0'
+  # 2026-10-12 ÄNDERUNG Ende: Zielposition des Mischers als Float
 number:
 
   - platform: template
@@ -249,16 +255,54 @@ number:
     restore_value: true
     unit_of_measurement: "°C"
 
+  # 2026-10-12 ÄNDERUNG Anfang: Kp ist jetzt die Positionsänderung in % pro 15-s-Zyklus und Kelvin Fehler (Startwert 0.1)
+  # 2026-10-12 ACHTUNG: restore_value stellt nach dem Flashen den alten Wert (0.5) wieder her, daher Kp einmalig in HA auf 0.1 setzen
   - platform: template
     name: "PID Kp"
     id: pid_kp
-    min_value: 0.1
-    max_value: 5.0
+    min_value: 0.01
+    max_value: 0.3
+    step: 0.01
+    initial_value: 0.1
+    optimistic: true
+    restore_value: true
+  # 2026-10-12 ÄNDERUNG Ende: Kp
+
+  # 2026-10-12 ÄNDERUNG Anfang: neue Parameter für Prädiktion, Untergrenze und Startposition
+  - platform: template
+    name: "Vorlauf Horizont"
+    id: vl_horizont
+    min_value: 0.0
+    max_value: 2.0
     step: 0.1
-    initial_value: 0.5
+    initial_value: 1.0
     optimistic: true
     restore_value: true
 
+  - platform: template
+    name: "Mischer Min Position"
+    id: pos_min
+    min_value: 0.0
+    max_value: 60.0
+    step: 1.0
+    initial_value: 45.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "%"
+
+  - platform: template
+    name: "Mischer Startposition"
+    id: pos_start
+    min_value: 0.0
+    max_value: 100.0
+    step: 1.0
+    initial_value: 60.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "%"
+  # 2026-10-12 ÄNDERUNG Ende: neue Parameter
+
+  # 2026-10-12 HINWEIS: PID Ki und PID Kd werden seit der Änderung nicht mehr verwendet, bewusst nicht entfernt, damit die HA-Entitäten nicht verwaisen
   - platform: template
     name: "PID Ki"
     id: pid_ki
@@ -412,24 +456,28 @@ sensor:
     name: Ruecklauf
     id: ruecklauf 
     update_interval: never
+    state_class: measurement
   - platform: dallas_temp
 #    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 1
     name: RaumTemp
     id: raumtemp 
     update_interval: never
+    state_class: measurement
   - platform: dallas_temp
 #    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 2
     name: Zulauf
     id: zulauf 
     update_interval: never
+    state_class: measurement
   - platform: dallas_temp
 #    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 3
     name: Vorlauf
     id: vorlauf 
     update_interval: never
+    state_class: measurement
   - platform: template
     name: "Raw touch value"
     id: touch_raw_sensor
@@ -442,12 +490,14 @@ sensor:
     name: "Außentemperatur"
     entity_id: sensor.tempext
     id: aussentemp
+    state_class: measurement
 
   - platform: homeassistant   
     name: "Rollaktor1 Position (Ist)"
     id: rollaktor1_position_ist
     entity_id: cover.rollaktor1
     attribute: current_position
+    state_class: measurement
 
   - platform: template
     name: "VL-RL Differenz"
@@ -463,6 +513,8 @@ sensor:
     id: soll_vorlauf
     unit_of_measurement: "°C"
     update_interval: never
+    state_class: measurement
+    device_class: temperature
     lambda: |-
       if (isnan(id(aussentemp).state)) return NAN;
       float x = id(aussentemp).state;
@@ -479,6 +531,7 @@ sensor:
     id: vl_trend
     unit_of_measurement: "°C/3min"
     update_interval: never
+    state_class: measurement
     lambda: |-
       if (id(puffer_gefuellt) < 12) return NAN;
       float werte[12] = {
@@ -488,8 +541,10 @@ sensor:
         id(vl_h9),  id(vl_h10), id(vl_h11)
       };
       int idx = id(vl_idx);
-      float aeltester = werte[(idx + 1) % 12];
-      float neuester  = werte[idx];
+      // 2026-10-12 ÄNDERUNG Anfang: Indizes korrigiert, vl_idx zeigt nach puffer_schreiben auf den ältesten Wert, der neueste liegt davor
+      float aeltester = werte[idx];
+      float neuester  = werte[(idx + 11) % 12];
+      // 2026-10-12 ÄNDERUNG Ende: Indizes korrigiert
       return neuester - aeltester;
 
   - platform: template
@@ -497,6 +552,7 @@ sensor:
     id: mischer_position
     unit_of_measurement: "%"
     update_interval: never
+    state_class: measurement
     lambda: |-
       return (float)id(mischer_position_ms) / 1200.0;
 
@@ -514,6 +570,7 @@ sensor:
     name: "Mischer Letzte Priorität"
     id: mischer_letzte_prioritaet
     update_interval: never
+    state_class: measurement
     lambda: |-
       return id(letzte_prioritaet);
   
@@ -522,6 +579,7 @@ sensor:
     id: pid_ausgang_sensor
     unit_of_measurement: "°C"
     update_interval: never
+    state_class: measurement
     lambda: return id(pid_letzter_ausgang);
 
   - platform: template
@@ -529,6 +587,8 @@ sensor:
     id: sollvorlauf_korrigiert
     unit_of_measurement: "°C"
     update_interval: never
+    state_class: measurement
+    device_class: temperature
     lambda: return id(soll_vl_korrigiert);
 
   - platform: template
@@ -536,6 +596,7 @@ sensor:
     id: zl_trend_sensor
     unit_of_measurement: "°C/min"
     update_interval: never
+    state_class: measurement
     lambda: |-
       if (id(zl_prev2) == 0.0f) return NAN;
       return (id(zulauf).state - id(zl_prev2)) * 2.0f;  // °C/min bei 30s Fenster
@@ -702,57 +763,22 @@ script:
           ESP_LOGD("regelung", "AT=%.1f -> Soll-VL=%.1f; Spreizung=%.1f -> Korrektur=%.1f -> korr. Soll=%.1f; Ist-VL=%.1f",
                    at, id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl, vl);
 
-          // PID berechnen
-          float fehler     = soll_vl - vl;
-          float dt         = 15.0f;
-          float kp         = id(pid_kp).state;
-          float ki         = id(pid_ki).state;
-          float kd         = id(pid_kd).state;
-          float ableitung  = (fehler - id(pid_letzter_fehler)) / dt;
-          bool am_anschlag_auf = id(mischer_position_ms) >= 120000;
-          bool am_anschlag_zu  = id(mischer_position_ms) <= 0;
-
-          if ((fehler > 0) != (id(pid_letzter_fehler) > 0)) {
-            ESP_LOGD("regelung", "Fehler-Vorzeichen gewechselt, Integral reset");
-            id(pid_integral) = 0.0f;
+          // 2026-10-12 ÄNDERUNG Anfang: PID durch Integrator mit Prädiktion ersetzt (Ki, Kd, Feedforward und alte Positionsrechnung entfallen)
+          // 2026-10-12 Position des Mischers in % (aus dem Rollaktor-Ist, siehe oben)
+          float pos_ist = id(mischer_position_ms) / 1200.0f;
+          // 2026-10-12 Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen
+          if (fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
+            id(pos_ziel) = pos_ist;
           }
-          bool windup_schutz = (fehler > 0 && am_anschlag_auf) ||
-                               (fehler < 0 && am_anschlag_zu);
-          if (!windup_schutz) {
-            id(pid_integral) = id(pid_integral) + fehler * dt;
-          }
-          id(pid_integral) = max(-100.0f, min(100.0f, id(pid_integral)));
-
-          float ausgang = kp * fehler
-                        + ki * id(pid_integral)
-                        + kd * ableitung;
-
-          id(pid_letzter_fehler) = fehler;
-
-          ESP_LOGD("regelung", "PID: fehler=%.2f integral=%.2f ausgang=%.2f",
-                   fehler, id(pid_integral), ausgang);
-
-          // Feedforward
-          if (id(zl_prev2) > 0.0f) {
-            float zl_trend = (id(zulauf).state - id(zl_prev2)) * 2.0f;
-            if (zl_trend > 0.5f) {
-              float ff = min(zl_trend * 0.5f, 3.0f);
-              ausgang = ausgang - ff;
-              ESP_LOGD("regelung", "Feedforward: ZL-Trend=%.2f FF=%.2f -> Ausgang=%.2f",
-                       zl_trend, ff, ausgang);
-            }
-          }
-          id(pid_letzter_ausgang) = ausgang;
-          
-          // Impulslänge aus PID-Ausgang berechnen
-          //int impuls_ms = (int)(abs(ausgang) * 1000.0f);
-          //impuls_ms     = max(500, min(10000, impuls_ms));
-          float delta_pct = max(0.417f, min(8.33f, abs(ausgang) * 0.833f)); 
-          float aktuelle_pct = id(mischer_position_ms);
-          float ziel_pct     = aktuelle_pct + (ausgang > 0 ? delta_pct : -delta_pct);
-          ziel_pct = max(0.0f, min(100.0f, ziel_pct));
-          int ziel_pct_int = (int)round(ziel_pct);
-
+          // 2026-10-12 Vorlauftrend (K pro ca. 3 min) fortschreiben, damit die Totzeit der Strecke berücksichtigt wird
+          float trend   = isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;
+          float vl_pred = vl + trend * id(vl_horizont).state;
+          float fehler  = soll_vl - vl_pred;
+          // 2026-10-12 Geloggt wird als "PID Ausgang" jetzt der Prädiktionsfehler in K
+          id(pid_letzter_ausgang) = fehler;
+          ESP_LOGD("regelung", "VL=%.1f Trend=%.2f -> VL-Prognose=%.1f; Soll=%.1f -> Fehler=%.2f; Pos-Ist=%.1f%% Pos-Ziel=%.1f%%",
+                   vl, trend, vl_pred, soll_vl, fehler, pos_ist, id(pos_ziel));
+          // 2026-10-12 ÄNDERUNG Ende: PID durch Integrator mit Prädiktion ersetzt
 
           ESP_LOGI("regelung", "Berechnungen abgeschlossen");
 
@@ -765,7 +791,19 @@ script:
             id(letzte_prioritaet) = 80;
             ESP_LOGI("regelung", "P80 Alle Ventile zu -> Regelung pausiert");
             id(pid_integral) = 0.0f;
-            id(ha_mischer_stop).execute();
+            // 2026-10-12 ÄNDERUNG Anfang: bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt
+            // 2026-10-12 Bei kaltem Zulauf bleibt es beim bisherigen Verhalten (Mischer anhalten, Position halten)
+            if (zl - soll_vl > 15.0f) {
+              int start = (int) roundf(id(pos_start).state);
+              id(pos_ziel) = (float) start;
+              if (fabsf(pos_ist - (float) start) > 2.0f) {
+                id(mischer_fahre_position).execute(start);
+                id(mischer_position_ms) = start * 1200;
+              }
+            } else {
+              id(ha_mischer_stop).execute();
+            }
+            // 2026-10-12 ÄNDERUNG Ende: Startposition bei P80
             return;
           }
 
@@ -798,28 +836,34 @@ script:
             return;
           }
 
-          // PRIORITÄT 4+5: PID Aktion -> direkte Positionsvorgabe
-          float totband = 1.0f;
-          if (abs(ausgang) < totband) {
+          // 2026-10-12 ÄNDERUNG Anfang: Totband auf dem Fehler (+-1 K) statt auf dem Positionsschritt, Zielposition als Float, Untergrenze im Regelbetrieb
+          const float totband = 1.0f;
+          if (fabsf(fehler) < totband) {
             id(letzte_prioritaet) = 0;
-            ESP_LOGI("regelung", "P0: PID im Totband (%.2f) -> nichts tun", ausgang);
+            ESP_LOGI("regelung", "P0: Fehler im Totband (%.2f K) -> nichts tun", fehler);
             return;
           }
 
-          float mindest_delta = 3.0f;
-          if (abs(ziel_pct_int - aktuelle_pct) < mindest_delta) {
+          // 2026-10-12 Positionsschritt pro Zyklus in %, begrenzt auf +-2 %
+          float delta = max(-2.0f, min(2.0f, id(pid_kp).state * fehler));
+          float pos_alt = id(pos_ziel);
+          // 2026-10-12 Die Untergrenze pos_min gilt nur nach unten, aus einer Stellung darunter wird nicht nach oben gezwungen
+          float untergrenze = min(id(pos_min).state, pos_alt);
+          id(pos_ziel) = max(untergrenze, min(100.0f, pos_alt + delta));
+          int ziel = (int) roundf(id(pos_ziel));
+          if (ziel == (int) roundf(pos_alt)) {
             id(letzte_prioritaet) = 0;
-            ESP_LOGI("regelung", "P0: Positionsänderung zu klein (%.1f%% -> %d%%) -> nichts tun",
-                     aktuelle_pct, ziel_pct_int);
+            ESP_LOGI("regelung", "P0: Zielposition %.2f%% -> noch %d%%, nichts zu senden", id(pos_ziel), ziel);
             return;
           }
 
-          id(letzte_prioritaet) = (ausgang > 0) ? 1 : -1;
-          ESP_LOGI("regelung", "P%d: PID -> Zielposition %d%% (aktuell %.1f%%, ausgang=%.2f)",
-                   id(letzte_prioritaet), ziel_pct_int, aktuelle_pct, ausgang);
-          id(mischer_fahre_position).execute(ziel_pct_int);
-          id(mischer_position_ms) = ziel_pct_int * 1200;
-          id(letzte_fahrtrichtung) = (ausgang > 0) ? 1 : -1;
+          id(letzte_prioritaet) = (delta > 0) ? 1 : -1;
+          ESP_LOGI("regelung", "P%d: Fehler=%.2f K -> Zielposition %d%% (Ist %.1f%%)",
+                   id(letzte_prioritaet), fehler, ziel, pos_ist);
+          id(mischer_fahre_position).execute(ziel);
+          id(mischer_position_ms) = ziel * 1200;
+          id(letzte_fahrtrichtung) = (delta > 0) ? 1 : -1;
+          // 2026-10-12 ÄNDERUNG Ende: Totband auf dem Fehler, Float-Zielposition, Untergrenze
 
 interval:
   - interval: 15s
@@ -860,5 +904,13 @@ interval:
             vl_rl_diff: !lambda "return id(vorlauf).state - id(ruecklauf).state;"
             zl_trend: !lambda "return (id(zl_prev2) > 0.0f) ? (id(zulauf).state - id(zl_prev2)) * 2.0f : 0.0f;"
             aussentemp: !lambda "return id(aussentemp).state;"
+            # 2026-10-12 ÄNDERUNG Anfang: zusätzliche Logwerte (in der CSV-Automation hinten anhängen)
+            pos_ist: !lambda "return isnan(id(rollaktor1_position_ist).state) ? -1.0f : id(rollaktor1_position_ist).state;"
+            vl_trend: !lambda "return isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;"
+            # 2026-10-12 ÄNDERUNG Ende: zusätzliche Logwerte
+            # 2026-10-14 ÄNDERUNG Anfang: Override-Status und Zielposition des Rollaktors mitloggen
+            override: !lambda "return id(override_aktiv).state ? 1 : 0;"
+            pos_ziel: !lambda "return id(pos_ziel);"
+            # 2026-10-14 ÄNDERUNG Ende: Override-Status und Zielposition            
 # Das csv-log kann unter codesandbox.io, login holger.g.ullrich@googlemail.com, analysiert werden. saucool.
 # im terminal mit npm run dev
