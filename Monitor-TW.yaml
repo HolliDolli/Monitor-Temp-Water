@@ -1,3 +1,11 @@
+# 2026-10-22 ÄNDERUNG Anfang: Quelle der Raumtemperatur an einer Stelle, Tausch gegen den echten Raumsensor = nur diese Zeile ändern
+substitutions:
+  raumtemp_quelle: sensor.grp_wz_int0000003_temperature
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Untergrenze der Raum-Solltemperatur (Absenkung), Frostschutz
+  HZG_FROST_MIN: "12.0"
+  # 2026-10-23 ÄNDERUNG Ende: HZG Untergrenze
+# 2026-10-22 ÄNDERUNG Ende: Quelle der Raumtemperatur
+
 esp32:
   board: lolin32_lite
   framework:
@@ -29,6 +37,12 @@ esphome:
       #- lambda: id(mischer_position_ms) = 0;
       #- logger.log: "Boot: Mischer ist ganz zu, Position = 0"
       - lambda: id(boot_fertig) = true;
+      # 2026-10-23 ÄNDERUNG Anfang: HZG Powerbetrieb fällt nach einem Neustart auf Regelbetrieb zurück
+      - lambda: |-
+          if (id(hzg_betriebsmodus).active_index().value_or(0) == 2) {
+            id(hzg_betriebsmodus).make_call().set_index(0).perform();
+          }
+      # 2026-10-23 ÄNDERUNG Ende: HZG Powerbetrieb nach Neustart
   on_shutdown:
     priority: -100.0
     then:
@@ -69,6 +83,9 @@ api:
   
 time:
   - platform: homeassistant
+    # 2026-10-23 ÄNDERUNG Anfang: HZG id für die Uhrzeit (Heizzeit)
+    id: ha_time
+    # 2026-10-23 ÄNDERUNG Ende: HZG id für die Uhrzeit
 
 sun:
   latitude: 51.14°
@@ -177,6 +194,114 @@ globals:
     restore_value: false
     initial_value: '60.0'
   # 2026-10-12 ÄNDERUNG Ende: Zielposition des Mischers als Float
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Zustand der Raumregelung
+  # 2026-10-23 Gelernte Korrektur des Soll-Vorlaufs (K) an den Stützstellen AT = -10, -5, 0, 5, 10, 15 °C, dazwischen wird linear interpoliert
+  # 2026-10-23 Kein restore_value (Flash-Schonung): Die Tabelle wird in HA im input_text.hzg_lerntabelle gesichert und beim Start von dort gelesen
+  - id: hzg_tab
+    type: float[6]
+    restore_value: false
+    initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
+  # 2026-10-23 Aufheizzeit in Minuten pro Kelvin Differenz, wird an jedem Heizzeit-Beginn nachgeführt
+  - id: hzg_k_auf
+    type: float
+    restore_value: false
+    initial_value: '45.0'
+  - id: hzg_geladen
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_save_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_save_noetig
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_save_str
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: hzg_raum_f
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_raum_f_ok
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_sensor_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_soll_raum
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_fehler
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_korr
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_soll_vl_eff
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_aufheiz_min
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_aufheizen
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 2026-10-23 0 Aus, 1 Heizen, 2 Absenken, 3 Aufheizen, 4 Party, 5 Power, 6 Fallback
+  - id: hzg_modus_nr
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_modus_prev
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_lernen
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_power_start
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_power_zuletzt
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_power_gesehen
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_power_gesendet
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 2026-10-23 Fensterkontakt: Zeitpunkt, zu dem das Fenster zuletzt offen war (Lernsperre bis 30 min nach dem Schließen)
+  - id: hzg_fenster_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_fenster_gesehen
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 2026-10-23 Korrektur: Vorlauf-Max im Powerbetrieb ausgelöst, erst 5 K darunter wieder öffnen
+  - id: hzg_power_vlmax
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 2026-10-23 ÄNDERUNG Ende: HZG Zustand der Raumregelung
 number:
 
   - platform: template
@@ -260,8 +385,8 @@ number:
   - platform: template
     name: "PID Kp"
     id: pid_kp
-    min_value: 0.01
-    max_value: 0.3
+    min_value: 0.02
+    max_value: 0.3  # 2026-10-23 Kp-Bereich begrenzt (Stand deiner Version vom 14.10.)
     step: 0.01
     initial_value: 0.1
     optimistic: true
@@ -323,6 +448,59 @@ number:
     optimistic: true
     restore_value: true
   
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Einstellungen der Raumregelung
+  - platform: template
+    name: "HZG_Wunschtemp"
+    id: hzg_wunschtemp
+    min_value: 17.0
+    max_value: 23.0
+    step: 0.5
+    initial_value: 21.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "HZG_Absenkung"
+    id: hzg_absenkung
+    min_value: 0.0
+    max_value: 10.0
+    step: 0.5
+    initial_value: 3.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "K"
+
+  - platform: template
+    name: "HZG_Power_Dauer"
+    id: hzg_power_dauer
+    min_value: 10
+    max_value: 240
+    step: 10
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "min"
+  # 2026-10-23 ÄNDERUNG Ende: HZG Einstellungen der Raumregelung
+
+# 2026-10-23 ÄNDERUNG Anfang: HZG Heizzeit (täglich, ohne Wochenendprofil)
+datetime:
+  - platform: template
+    name: "HZG_Heizzeit_von"
+    id: hzg_heizzeit_von
+    type: time
+    optimistic: true
+    initial_value: "06:00:00"
+    restore_value: true
+
+  - platform: template
+    name: "HZG_Heizzeit_bis"
+    id: hzg_heizzeit_bis
+    type: time
+    optimistic: true
+    initial_value: "22:00:00"
+    restore_value: true
+# 2026-10-23 ÄNDERUNG Ende: HZG Heizzeit
 esp32_touch:
   setup_mode: false    
   low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
@@ -377,6 +555,13 @@ switch:
     on_turn_off:
       - logger.log: "Override deaktiviert – Automatik läuft wieder"
 
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Raumregelung ein/aus (aus = reine Heizkurve)
+  - platform: template
+    name: "HZG_Regelung_aktiv"
+    id: hzg_regelung_aktiv
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  # 2026-10-23 ÄNDERUNG Ende: HZG Raumregelung ein/aus
 select:
   - platform: template
     name: "Mischer Override Richtung"
@@ -403,10 +588,77 @@ select:
             }
 
   
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Betriebsmodus
+  - platform: template
+    name: "HZG_Betriebsmodus"
+    id: hzg_betriebsmodus
+    optimistic: true
+    options:
+      - "Regelbetrieb"
+      - "Partybetrieb"
+      - "Powerbetrieb"
+    initial_option: "Regelbetrieb"
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (i == 2) id(hzg_power_start) = millis();
+  # 2026-10-23 ÄNDERUNG Ende: HZG Betriebsmodus
 text_sensor:
   - platform: version
     name: "ESPHome Version"
 
+  # 2026-10-23 ÄNDERUNG Anfang: HZG gelernte Tabelle aus HA lesen (nur einmal nach dem Start), Format: t0;t1;t2;t3;t4;t5;Aufheizfaktor
+  # 2026-10-23 Wird der Helper von Hand geändert, danach den ESP neu starten, sonst überschreibt der ESP die Änderung beim nächsten Sichern
+  - platform: homeassistant
+    id: hzg_tab_ha
+    entity_id: input_text.hzg_lerntabelle
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(hzg_geladen)) return;
+            if (x == "unavailable") return;
+            if (x == "" || x == "unknown") {
+              id(hzg_geladen) = true;
+              id(hzg_save_ms) = millis();
+              ESP_LOGI("hzg", "Lerntabelle in HA leer, Start mit Nullwerten");
+              return;
+            }
+            float v[7];
+            int n = sscanf(x.c_str(), "%f;%f;%f;%f;%f;%f;%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
+            if (n != 7) {
+              ESP_LOGW("hzg", "Lerntabelle in HA unlesbar (%d Werte): %s", n, x.c_str());
+              return;
+            }
+            for (int k = 0; k < 6; k++) id(hzg_tab)[k] = max(-15.0f, min(15.0f, v[k]));
+            id(hzg_k_auf) = max(10.0f, min(120.0f, v[6]));
+            // 2026-10-23 Korrektur: geladene Werte als "zuletzt gesichert" merken, sonst schreibt der ESP nach 30 min ungeändert zurück
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%.2f;%.2f;%.2f;%.2f;%.2f;%.2f;%.1f",
+                     id(hzg_tab)[0], id(hzg_tab)[1], id(hzg_tab)[2], id(hzg_tab)[3], id(hzg_tab)[4], id(hzg_tab)[5], id(hzg_k_auf));
+            id(hzg_save_str) = std::string(buf);
+            id(hzg_geladen) = true;
+            id(hzg_save_ms) = millis();
+            ESP_LOGI("hzg", "Lerntabelle aus HA geladen: %s", x.c_str());
+  # 2026-10-23 ÄNDERUNG Ende: HZG gelernte Tabelle aus HA lesen
+
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Modus als Text
+  - platform: template
+    name: "HZG_Modus"
+    id: hzg_modus_ts
+    update_interval: never
+    lambda: |-
+      switch (id(hzg_modus_nr)) {
+        case 1: return std::string("Heizen");
+        case 2: return std::string("Absenken");
+        case 3: return std::string("Aufheizen");
+        case 4: return std::string("Party");
+        case 5: return std::string("Power");
+        case 6: return std::string("Fallback");
+        default: return std::string("Aus");
+      }
+  # 2026-10-23 ÄNDERUNG Ende: HZG Modus als Text
 binary_sensor:
   - platform: status
     name: "Statussensor"
@@ -435,6 +687,18 @@ binary_sensor:
     entity_id: binary_sensor.heizung_mindestens_ein_ventil_offen
 
  
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Fensterkontakt Wohnzimmer (EGW-FK), nur intern, keine neue Entität in HA
+  - platform: homeassistant
+    id: hzg_fenster
+    entity_id: binary_sensor.hmip_swdo_0000dbe9a0a37d_state
+  # 2026-10-23 ÄNDERUNG Ende: HZG Fensterkontakt
+
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Lernen freigegeben
+  - platform: template
+    name: "HZG_Lernen_aktiv"
+    id: hzg_lernen_bs
+    lambda: return id(hzg_lernen);
+  # 2026-10-23 ÄNDERUNG Ende: HZG Lernen freigegeben
 sensor:  
   - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
     name: "WiFi Signal dB"
@@ -491,6 +755,20 @@ sensor:
     entity_id: sensor.tempext
     id: aussentemp
     state_class: measurement
+
+  # 2026-10-22 ÄNDERUNG Anfang: Raumtemperatur Wohnzimmer (Führungsraum), bewusst ungefiltert, ein Filter gehört zum echten Sensor in die äußere Regelung
+  # 2026-10-22 Die Quelle steht oben unter substitutions (raumtemp_quelle), beim Sensortausch nur dort ändern
+  - platform: homeassistant
+    name: "EGWZ Raumtemp"
+    id: egwz_raumtemp
+    entity_id: ${raumtemp_quelle}
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    # 2026-10-22 Sensoren der Plattform homeassistant sind standardmäßig intern, erst internal: false legt die Entität in HA an (stabiler Name samt Statistik über den Sensortausch hinweg)
+    internal: false
+  # 2026-10-22 ÄNDERUNG Ende: Raumtemperatur Wohnzimmer
 
   - platform: homeassistant   
     name: "Rollaktor1 Position (Ist)"
@@ -602,6 +880,68 @@ sensor:
       return (id(zulauf).state - id(zl_prev2)) * 2.0f;  // °C/min bei 30s Fenster
 
   
+  # 2026-10-23 ÄNDERUNG Anfang: HZG Sensoren der Raumregelung
+  - platform: template
+    name: "HZG_Soll_Raum"
+    id: hzg_soll_raum_s
+    unit_of_measurement: "°C"
+    update_interval: never
+    state_class: measurement
+    device_class: temperature
+    lambda: return id(hzg_soll_raum);
+
+  - platform: template
+    name: "HZG_Raumfehler"
+    id: hzg_raumfehler_s
+    unit_of_measurement: "K"
+    update_interval: never
+    state_class: measurement
+    lambda: return id(hzg_fehler);
+
+  - platform: template
+    name: "HZG_Korrektur"
+    id: hzg_korrektur_s
+    unit_of_measurement: "K"
+    update_interval: never
+    state_class: measurement
+    lambda: return id(hzg_korr);
+
+  - platform: template
+    name: "HZG_Soll_VL"
+    id: hzg_soll_vl_s
+    unit_of_measurement: "°C"
+    update_interval: never
+    state_class: measurement
+    device_class: temperature
+    lambda: return id(hzg_soll_vl_eff);
+
+  - platform: template
+    name: "HZG_Aufheizzeit"
+    id: hzg_aufheizzeit_s
+    unit_of_measurement: "min"
+    update_interval: never
+    state_class: measurement
+    lambda: return id(hzg_aufheiz_min);
+
+  # 2026-10-23 Wetter aus weather.openweathermap, vorerst nur zum Mitloggen und für die Auswertung
+  - platform: homeassistant
+    name: "HZG_Bewoelkung"
+    id: hzg_bewoelkung
+    entity_id: weather.openweathermap
+    attribute: cloud_coverage
+    unit_of_measurement: "%"
+    state_class: measurement
+    internal: false
+
+  - platform: homeassistant
+    name: "HZG_Wind"
+    id: hzg_wind
+    entity_id: weather.openweathermap
+    attribute: wind_speed
+    unit_of_measurement: "km/h"
+    state_class: measurement
+    internal: false
+  # 2026-10-23 ÄNDERUNG Ende: HZG Sensoren der Raumregelung
 script:
 
   - id: ha_mischer_zu
@@ -711,6 +1051,167 @@ script:
           id(zl_prev1) = id(zulauf).state;
 
 
+  # 2026-10-23 ÄNDERUNG Anfang: HZG äußerer Kreis (Raumtemperatur -> Korrektur des Soll-Vorlaufs), läuft vor "regelung"
+  - id: hzg_aussen
+    mode: single
+    then:
+      - lambda: |-
+          // 2026-10-23 Konstanten
+          const float FROST_MIN = ${HZG_FROST_MIN};  // Untergrenze Raum-Soll in der Absenkung
+          const float KP_RAUM   = 3.0f;      // K Vorlauf pro K Raumfehler (sofort wirksam, begrenzt auf +-10 K)
+          const float ALPHA_F   = 0.02f;     // Filter Raumtemperatur pro 15-s-Zyklus (ca. 12 min Zeitkonstante)
+          const float ALPHA_I   = 0.0025f;   // Lernrate der Tabelle pro Zyklus und K Fehler (ca. 0,6 K/h je K)
+          uint32_t jetzt = millis();
+
+          // 2026-10-23 Modus-Auswahl und Power-Zeitlimit
+          int idx = id(hzg_betriebsmodus).active_index().value_or(0);
+          if (idx == 2 && (uint32_t)(jetzt - id(hzg_power_start)) > (uint32_t)(id(hzg_power_dauer).state * 60000.0f)) {
+            id(hzg_betriebsmodus).make_call().set_index(0).perform();
+            idx = 0;
+          }
+          if (idx == 2) {
+            id(hzg_power_zuletzt) = jetzt;
+            id(hzg_power_gesehen) = true;
+          } else {
+            id(hzg_power_gesendet) = false;
+            id(hzg_power_vlmax) = false;
+          }
+
+          // 2026-10-23 Fensterkontakt: solange offen, Zeitpunkt nachführen
+          if (id(hzg_fenster).state) {
+            id(hzg_fenster_ms) = jetzt;
+            id(hzg_fenster_gesehen) = true;
+          }
+
+          // 2026-10-23 Raumtemperatur filtern, Sensor gilt bis 20 min nach dem letzten gültigen Wert
+          float ist_roh = id(egwz_raumtemp).state;
+          bool roh_ok = !isnan(ist_roh) && ist_roh > 5.0f && ist_roh < 35.0f;
+          if (roh_ok) {
+            if (!id(hzg_raum_f_ok)) {
+              id(hzg_raum_f) = ist_roh;
+              id(hzg_raum_f_ok) = true;
+            } else {
+              id(hzg_raum_f) += ALPHA_F * (ist_roh - id(hzg_raum_f));
+            }
+            id(hzg_sensor_ms) = jetzt;
+            if (id(hzg_sensor_ms) == 0) id(hzg_sensor_ms) = 1;
+          }
+          bool sensor_ok = id(hzg_raum_f_ok) && id(hzg_sensor_ms) != 0 && (uint32_t)(jetzt - id(hzg_sensor_ms)) < 1200000UL;
+
+          // 2026-10-23 Heizzeit, Minuten bis zum Beginn der Heizzeit
+          bool in_heizzeit = true;
+          int min_bis_von = 0;
+          auto zeit = id(ha_time).now();
+          if (zeit.is_valid()) {
+            int jetzt_min = zeit.hour * 60 + zeit.minute;
+            int von = id(hzg_heizzeit_von).hour * 60 + id(hzg_heizzeit_von).minute;
+            int bis = id(hzg_heizzeit_bis).hour * 60 + id(hzg_heizzeit_bis).minute;
+            if (von == bis)     in_heizzeit = true;
+            else if (von < bis) in_heizzeit = (jetzt_min >= von && jetzt_min < bis);
+            else                in_heizzeit = (jetzt_min >= von || jetzt_min < bis);
+            min_bis_von = (von - jetzt_min + 1440) % 1440;
+          }
+
+          float wunsch = id(hzg_wunschtemp).state;
+          float absenk = id(hzg_absenkung).state;
+
+          // 2026-10-23 Aufheizen: Beginn so, dass zu "von" die Wunschtemperatur erreicht ist. Einmal gestartet bleibt es bis "von"
+          float diff_auf = sensor_ok ? max(0.0f, wunsch - id(hzg_raum_f)) : 0.0f;
+          float auf_min  = min(240.0f, id(hzg_k_auf) * diff_auf);
+          id(hzg_aufheiz_min) = auf_min;
+          if (in_heizzeit) {
+            id(hzg_aufheizen) = false;
+          } else if (id(hzg_aufheizen) && min_bis_von > 300) {
+            id(hzg_aufheizen) = false;
+          } else if (!id(hzg_aufheizen) && auf_min > 0.0f && min_bis_von <= (int) auf_min) {
+            id(hzg_aufheizen) = true;
+          }
+
+          // 2026-10-23 Modus: 0 Aus, 1 Heizen, 2 Absenken, 3 Aufheizen, 4 Party, 5 Power, 6 Fallback
+          int modus;
+          if (idx == 2)                              modus = 5;
+          else if (!id(hzg_regelung_aktiv).state)    modus = 0;
+          else if (!sensor_ok || !id(hzg_geladen))   modus = 6;
+          else if (idx == 1)                         modus = 4;
+          else if (in_heizzeit)                      modus = 1;
+          else if (id(hzg_aufheizen))                modus = 3;
+          else                                       modus = 2;
+
+          float soll_raum = wunsch;
+          if (modus == 2) soll_raum = max(FROST_MIN, wunsch - absenk);
+
+          // 2026-10-23 Aufheizzeit nachführen: Beim Übergang in die Heizzeit zu kalt = früher beginnen, deutlich zu warm = später
+          if (id(hzg_modus_prev) != 1 && modus == 1 && (id(hzg_modus_prev) == 2 || id(hzg_modus_prev) == 3)) {
+            float f = soll_raum - id(hzg_raum_f);
+            if (f > 0.5f)       id(hzg_k_auf) = min(120.0f, id(hzg_k_auf) * 1.15f);
+            else if (f < -0.3f) id(hzg_k_auf) = max(10.0f, id(hzg_k_auf) * 0.9f);
+            ESP_LOGI("hzg", "Heizzeit beginnt: Raumfehler=%.2f -> Aufheizzeit %.1f min/K", f, id(hzg_k_auf));
+          }
+          id(hzg_modus_prev) = modus;
+
+          // 2026-10-23 Korrektur des Soll-Vorlaufs: P-Anteil sofort, I-Anteil in der Tabelle (nur im Heizen/Party gelernt)
+          float korr = 0.0f;
+          float fehler = sensor_ok ? (soll_raum - id(hzg_raum_f)) : 0.0f;
+          bool lern = false;
+          float at = id(aussentemp).state;
+          if ((modus == 1 || modus == 2 || modus == 3 || modus == 4) && !isnan(at)) {
+            float p = (at + 10.0f) / 5.0f;
+            p = max(0.0f, min(5.0f, p));
+            int i0 = min(4, (int) p);
+            float w1 = p - (float) i0;
+            float w0 = 1.0f - w1;
+            float tab = w0 * id(hzg_tab)[i0] + w1 * id(hzg_tab)[i0 + 1];
+            float kp = max(-10.0f, min(10.0f, KP_RAUM * fehler));
+            korr = max(-15.0f, min(15.0f, tab + kp));
+
+            int pr = id(letzte_prioritaet);
+            // 2026-10-23 Korrektur (Anti-Windup): nur lernen, wenn VL dem Soll-VL folgt und der Soll-VL physikalisch erreichbar ist (über RL)
+            float vl_i = id(vorlauf).state;
+            float rl_i = id(ruecklauf).state;
+            float svl  = id(hzg_soll_vl_eff);
+            bool folgt = !isnan(vl_i) && !isnan(rl_i) && svl > 0.0f
+                         && fabsf(vl_i - svl) < 2.0f && svl >= rl_i + 2.0f;
+            // 2026-10-23 Fenster: kein Lernen bei offenem Fenster und bis 30 min nach dem Schließen (Lüften ist kein Heizbedarf)
+            bool fenster_ruhe = !id(hzg_fenster_gesehen) || (uint32_t)(jetzt - id(hzg_fenster_ms)) > 1800000UL;
+            bool power_nachlauf = id(hzg_power_gesehen) && (uint32_t)(jetzt - id(hzg_power_zuletzt)) < 7200000UL;
+            lern = (modus == 1 || modus == 4) && id(ventil_offen).state && !id(override_aktiv).state
+                   && (pr == 0 || pr == 1 || pr == -1) && !power_nachlauf && id(hzg_geladen) && folgt && fenster_ruhe;
+            if (lern) {
+              float d = ALPHA_I * fehler;
+              id(hzg_tab)[i0]     = max(-15.0f, min(15.0f, id(hzg_tab)[i0]     + w0 * d));
+              id(hzg_tab)[i0 + 1] = max(-15.0f, min(15.0f, id(hzg_tab)[i0 + 1] + w1 * d));
+            }
+          }
+          id(hzg_lernen) = lern;
+          id(hzg_korr) = korr;
+          id(hzg_fehler) = fehler;
+          id(hzg_soll_raum) = soll_raum;
+          id(hzg_modus_nr) = modus;
+          ESP_LOGD("hzg", "Modus=%d Raum-Soll=%.1f Raum-Ist(gefiltert)=%.2f Fehler=%.2f Korrektur=%.2f Lernen=%d Aufheizzeit=%.0f min",
+                   modus, soll_raum, id(hzg_raum_f), fehler, korr, lern ? 1 : 0, auf_min);
+
+          // 2026-10-23 Sichern nach HA: höchstens alle 30 min und nur bei Änderung, nie vor dem Laden
+          if (id(hzg_geladen) && (uint32_t)(jetzt - id(hzg_save_ms)) > 1800000UL) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%.2f;%.2f;%.2f;%.2f;%.2f;%.2f;%.1f",
+                     id(hzg_tab)[0], id(hzg_tab)[1], id(hzg_tab)[2], id(hzg_tab)[3], id(hzg_tab)[4], id(hzg_tab)[5], id(hzg_k_auf));
+            id(hzg_save_ms) = jetzt;
+            if (id(hzg_save_str) != std::string(buf)) {
+              id(hzg_save_str) = std::string(buf);
+              id(hzg_save_noetig) = true;
+            }
+          }
+      - if:
+          condition:
+            lambda: 'return id(hzg_save_noetig);'
+          then:
+            - homeassistant.service:
+                service: input_text.set_value
+                data:
+                  entity_id: input_text.hzg_lerntabelle
+                  value: !lambda 'return id(hzg_save_str);'
+            - lambda: 'id(hzg_save_noetig) = false;'
+  # 2026-10-23 ÄNDERUNG Ende: HZG äußerer Kreis
   - id: regelung
     mode: single
     then:
@@ -755,6 +1256,12 @@ script:
 
           // Heizkurve + Spreizungskorrektur
           float soll_vl = id(soll_vorlauf).state;
+          // 2026-10-23 ÄNDERUNG Anfang: HZG Korrektur aus dem äußeren Kreis auf den Soll-Vorlauf aufschlagen (ohne Raumregelung ist hzg_korr = 0)
+          if (id(hzg_korr) != 0.0f) {
+            soll_vl = max(20.0f, min(id(vorlauf_max).state - 2.0f, soll_vl + id(hzg_korr)));
+          }
+          id(hzg_soll_vl_eff) = soll_vl;
+          // 2026-10-23 ÄNDERUNG Ende: HZG Korrektur
           float spreizungsfehler = diff - 12.0f;
           float spreizungskorrektur = max(-5.0f, min(5.0f, spreizungsfehler * 0.5f));
           // Wir nehmen die Spreizungskorrektur mal raus. Sinnhaftigkeit ist nicht gesichert.
@@ -786,6 +1293,43 @@ script:
           // BLOCK 2: Prioritäten und Aktionen
           // -------------------------------------------------------
 
+          // 2026-10-23 ÄNDERUNG Anfang: HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht
+          if (id(hzg_betriebsmodus).active_index().value_or(0) == 2) {
+            // 2026-10-23 Korrektur: Hysterese 5 K, damit der Mischer nicht zwischen ZU und 100 % pendelt
+            if (vl >= id(vorlauf_max).state && !id(hzg_power_vlmax)) {
+              id(hzg_power_vlmax) = true;
+              ESP_LOGW("regelung", "P60 (Power): Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
+              id(hzg_power_gesendet) = false;
+              id(ha_mischer_stop).execute();
+              id(ha_mischer_zu).execute();
+            }
+            if (id(hzg_power_vlmax)) {
+              if (vl < id(vorlauf_max).state - 5.0f) {
+                id(hzg_power_vlmax) = false;
+              } else {
+                id(letzte_prioritaet) = 60;
+                return;
+              }
+            }
+            if (zl < id(kessel_min).state) {
+              id(letzte_prioritaet) = 50;
+              ESP_LOGW("regelung", "P50 (Power): Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
+              id(hzg_power_gesendet) = false;
+              id(ha_mischer_stop).execute();
+              return;
+            }
+            id(letzte_prioritaet) = 85;
+            id(pos_ziel) = 100.0f;
+            if (!id(hzg_power_gesendet)) {
+              ESP_LOGI("regelung", "P85: Powerbetrieb -> Mischer auf 100%% (Ist %.1f%%)", pos_ist);
+              id(mischer_fahre_position).execute(100);
+              id(mischer_position_ms) = 120000;
+              id(letzte_fahrtrichtung) = 1;
+              id(hzg_power_gesendet) = true;
+            }
+            return;
+          }
+          // 2026-10-23 ÄNDERUNG Ende: HZG Powerbetrieb
           // PRIORITÄT 0: Alle Ventile geschlossen
           if (!id(ventil_offen).state) {
             id(letzte_prioritaet) = 80;
@@ -882,6 +1426,10 @@ interval:
       - component.update: zl_trend_sensor
       - component.update: vl_trend      
       - component.update: soll_vorlauf      
+      # 2026-10-23 ÄNDERUNG Anfang: HZG äußerer Kreis vor der Regelung ausführen
+      - script.execute: hzg_aussen
+      - script.wait: hzg_aussen
+      # 2026-10-23 ÄNDERUNG Ende: HZG äußerer Kreis
       - logger.log: 'Regelung'
       - script.execute: regelung
       - script.wait: regelung
@@ -891,6 +1439,14 @@ interval:
       - component.update: sollvorlauf_korrigiert
       - component.update: mischer_position
       - component.update: mischer_anschlag
+      # 2026-10-23 ÄNDERUNG Anfang: HZG Sensoren aktualisieren
+      - component.update: hzg_soll_raum_s
+      - component.update: hzg_raumfehler_s
+      - component.update: hzg_korrektur_s
+      - component.update: hzg_soll_vl_s
+      - component.update: hzg_aufheizzeit_s
+      - component.update: hzg_modus_ts
+      # 2026-10-23 ÄNDERUNG Ende: HZG Sensoren aktualisieren
       - homeassistant.event:
           event: esphome.heizung_messung
           data:
@@ -908,9 +1464,35 @@ interval:
             pos_ist: !lambda "return isnan(id(rollaktor1_position_ist).state) ? -1.0f : id(rollaktor1_position_ist).state;"
             vl_trend: !lambda "return isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;"
             # 2026-10-12 ÄNDERUNG Ende: zusätzliche Logwerte
-            # 2026-10-14 ÄNDERUNG Anfang: Override-Status und Zielposition des Rollaktors mitloggen
+            # 2026-10-22 ÄNDERUNG Anfang: Raumtemperatur Wohnzimmer mitloggen (als letzte Spalte der CSV)
+            egwz_raumtemp: !lambda "return id(egwz_raumtemp).state;"
+            # 2026-10-22 ÄNDERUNG Ende: Raumtemperatur Wohnzimmer mitloggen
+            # 2026-10-23 ÄNDERUNG Anfang: Stand deiner Version vom 14.10. (Override und Zielposition, falls bei dir schon vorhanden bitte nur eine Kopie behalten)
             override: !lambda "return id(override_aktiv).state ? 1 : 0;"
             pos_ziel: !lambda "return id(pos_ziel);"
-            # 2026-10-14 ÄNDERUNG Ende: Override-Status und Zielposition            
+            # 2026-10-23 ÄNDERUNG Ende: Stand deiner Version vom 14.10.
+            # 2026-10-23 ÄNDERUNG Anfang: HZG Logwerte (in der CSV-Automation hinten anhängen, Reihenfolge wie hier)
+            hzg_soll_raum: !lambda "return id(hzg_soll_raum);"
+            hzg_korrektur: !lambda "return id(hzg_korr);"
+            hzg_soll_vl: !lambda "return id(hzg_soll_vl_eff);"
+            hzg_modus: !lambda "return id(hzg_modus_ts).state;"
+            hzg_bewoelkung: !lambda "return isnan(id(hzg_bewoelkung).state) ? -1.0f : id(hzg_bewoelkung).state;"
+            hzg_wind: !lambda "return isnan(id(hzg_wind).state) ? -1.0f : id(hzg_wind).state;"
+            # 2026-10-23 ÄNDERUNG Ende: HZG Logwerte
+            # 2026-10-23 ÄNDERUNG Anfang: Fensterkontakt und einstellbare Parameter mitloggen (in der CSV-Automation hinten anhängen, Reihenfolge wie hier)
+            fenster: !lambda "return id(hzg_fenster).state ? 1 : 0;"
+            hk_neigung: !lambda "return id(hk_neigung).state;"
+            hk_offset: !lambda "return id(hk_offset).state;"
+            pid_kp: !lambda "return id(pid_kp).state;"
+            vl_horizont: !lambda "return id(vl_horizont).state;"
+            pos_min: !lambda "return id(pos_min).state;"
+            pos_start: !lambda "return id(pos_start).state;"
+            vorlauf_max: !lambda "return id(vorlauf_max).state;"
+            kessel_min: !lambda "return id(kessel_min).state;"
+            heizgrenze: !lambda "return id(heizgrenze_at).state;"
+            hzg_wunsch: !lambda "return id(hzg_wunschtemp).state;"
+            hzg_absenkung: !lambda "return id(hzg_absenkung).state;"
+            hzg_aktiv: !lambda "return id(hzg_regelung_aktiv).state ? 1 : 0;"
+            # 2026-10-23 ÄNDERUNG Ende: Fensterkontakt und Parameter
 # Das csv-log kann unter codesandbox.io, login holger.g.ullrich@googlemail.com, analysiert werden. saucool.
 # im terminal mit npm run dev

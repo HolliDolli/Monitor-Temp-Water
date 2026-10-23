@@ -1,0 +1,943 @@
+# 2026-10-22 ÄNDERUNG Anfang: Quelle der Raumtemperatur an einer Stelle, Tausch gegen den echten Raumsensor = nur diese Zeile ändern
+substitutions:
+  raumtemp_quelle: sensor.grp_wz_int0000003_temperature
+# 2026-10-22 ÄNDERUNG Ende: Quelle der Raumtemperatur
+
+esp32:
+  board: lolin32_lite
+  framework:
+    type: esp-idf
+
+esphome:
+  name: monitor-tw
+    
+  on_boot:
+    priority: -100.0
+    then:
+      - logger.log: 'HTMon boot triggered'
+      - switch.turn_on: LEDint
+      # Mischer init, bruachen wir nicht mehr, haben ja jetzt echte Position
+      #- logger.log: "Boot: Mischer wird komplett zugefahren"
+      #- wait_until:
+      #    api.connected:
+      #- delay: 5000ms
+      #- logger.log: "API verbunden, fahre Mischer zu"
+      #- homeassistant.service:
+      #    service: cover.close_cover
+      #    data:
+      #      entity_id: cover.rollaktor1
+      #- delay: 125000ms
+      #- homeassistant.service:
+      #    service: cover.stop_cover
+      #    data:
+      #      entity_id: cover.rollaktor1
+      #- lambda: id(mischer_position_ms) = 0;
+      #- logger.log: "Boot: Mischer ist ganz zu, Position = 0"
+      - lambda: id(boot_fertig) = true;
+  on_shutdown:
+    priority: -100.0
+    then:
+      - switch.turn_off: LEDint
+      - logger.log: "HTMon shutdown triggered"
+
+
+# Enable logging
+logger:
+
+wifi:
+  networks:
+  - ssid: !secret GKssid
+    password: !secret GKpassword
+  - ssid: !secret BGssid
+    password: !secret BGpassword
+  - ssid: !secret SSssid
+    password: !secret SSpassword
+  ap:
+    ssid: !secret FBssid
+    password: !secret FBpassword
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+captive_portal:
+
+
+ota:
+  - platform: esphome
+
+# Enable Home Assistant API
+#
+# Achtung: Für Offlinekalender muss der API-Reboot auf 0s gesetzt werden, da die Tonne sonst alle 15 Minuten neu startet.
+#
+api:
+  reboot_timeout: 60min  # only enable this when creating an offline device; 0s=never reboot
+
+
+  
+time:
+  - platform: homeassistant
+
+sun:
+  latitude: 51.14°
+  longitude: 9.414°
+  
+globals:
+  - id: vl_h0
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h1
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h2
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h3
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h4
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h5
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h6
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h7
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h8
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h9
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h10
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_h11
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: vl_idx
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: letzte_fahrtrichtung
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: puffer_gefuellt
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: mischer_position_ms
+    type: int
+    restore_value: false
+    initial_value: '0'  # 0 = ganz zu, 120000 = ganz auf
+  - id: letzte_prioritaet
+    type: int
+    restore_value: false
+    initial_value: '0'  # 0 = nichts zu tun
+  - id: pid_integral
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: pid_letzter_fehler
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: pid_letzter_ausgang
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: boot_fertig
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: soll_vl_korrigiert
+    type: float
+    restore_value: false
+    initial_value: '0.0'  
+  - id: zl_prev1
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: zl_prev2
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  # 2026-10-12 ÄNDERUNG Anfang: Zielposition des Mischers als Float in % (statt Rundung bei jedem Zyklus)
+  - id: pos_ziel
+    type: float
+    restore_value: false
+    initial_value: '60.0'
+  # 2026-10-12 ÄNDERUNG Ende: Zielposition des Mischers als Float
+number:
+
+  - platform: template
+    name: "Heizung Neigung N"
+    id: hk_neigung
+    min_value: 0.2
+    max_value: 2.0
+    step: 0.1
+    initial_value: 1.3
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Heizung Offset L"
+    id: hk_offset
+    min_value: 10.0
+    max_value: 30.0
+    step: 1.0
+    initial_value: 18.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "Override Schrittweite ms"
+    id: override_schrittweite
+    min_value: 500
+    max_value: 30000
+    step: 500
+    initial_value: 3000
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "ms"
+
+  - platform: template
+    name: "Trend Schwelle"
+    id: trend_schwelle
+    min_value: 0.1
+    max_value: 2.0
+    step: 0.1
+    initial_value: 0.5
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C/3min"
+
+  - platform: template
+    name: "Heizgrenze AT"
+    id: heizgrenze_at
+    min_value: 10.0
+    max_value: 22.0
+    step: 0.5
+    initial_value: 17.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "Vorlauf Max"
+    id: vorlauf_max
+    min_value: 40.0
+    max_value: 90.0
+    step: 1.0
+    initial_value: 75.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  - platform: template
+    name: "Kessel Mindesttemperatur"
+    id: kessel_min
+    min_value: 20.0
+    max_value: 60.0
+    step: 1.0
+    initial_value: 40.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+
+  # 2026-10-12 ÄNDERUNG Anfang: Kp ist jetzt die Positionsänderung in % pro 15-s-Zyklus und Kelvin Fehler (Startwert 0.1)
+  # 2026-10-12 ACHTUNG: restore_value stellt nach dem Flashen den alten Wert (0.5) wieder her, daher Kp einmalig in HA auf 0.1 setzen
+  - platform: template
+    name: "PID Kp"
+    id: pid_kp
+    min_value: 0.01
+    max_value: 0.3
+    step: 0.01
+    initial_value: 0.1
+    optimistic: true
+    restore_value: true
+  # 2026-10-12 ÄNDERUNG Ende: Kp
+
+  # 2026-10-12 ÄNDERUNG Anfang: neue Parameter für Prädiktion, Untergrenze und Startposition
+  - platform: template
+    name: "Vorlauf Horizont"
+    id: vl_horizont
+    min_value: 0.0
+    max_value: 2.0
+    step: 0.1
+    initial_value: 1.0
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Mischer Min Position"
+    id: pos_min
+    min_value: 0.0
+    max_value: 60.0
+    step: 1.0
+    initial_value: 45.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "%"
+
+  - platform: template
+    name: "Mischer Startposition"
+    id: pos_start
+    min_value: 0.0
+    max_value: 100.0
+    step: 1.0
+    initial_value: 60.0
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "%"
+  # 2026-10-12 ÄNDERUNG Ende: neue Parameter
+
+  # 2026-10-12 HINWEIS: PID Ki und PID Kd werden seit der Änderung nicht mehr verwendet, bewusst nicht entfernt, damit die HA-Entitäten nicht verwaisen
+  - platform: template
+    name: "PID Ki"
+    id: pid_ki
+    min_value: 0.0
+    max_value: 0.01
+    step: 0.001
+    initial_value: 0.005
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "PID Kd"
+    id: pid_kd
+    min_value: 0.0
+    max_value: 2.0
+    step: 0.05
+    initial_value: 0.3
+    optimistic: true
+    restore_value: true
+  
+esp32_touch:
+  setup_mode: false    
+  low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
+  high_voltage_reference: 2.4V    # One of 2.4V, 2.5V, 2.6V, 2.7V. Default is 2.7V.
+  voltage_attenuation: 0V    # One of 1.5V, 1V, 0.5V, 0V. Default is 0V.
+  
+one_wire:
+  - platform: gpio
+    pin: GPIO26
+
+output:
+  - platform: gpio
+    pin: GPIO22
+    id: 'GPLEDint'
+
+switch:
+  - platform: output
+    id: "LEDint"
+    name: "LEDint"
+    output: "GPLEDint"
+    inverted: true
+    restore_mode: ALWAYS_ON
+  - platform: restart
+    name: "Monitor-TW Restart" 
+    
+  - platform: gpio
+    pin: 32
+    name: "Mischer Auf"
+    id: mischer_auf
+    interlock: [mischer_zu]
+    interlock_wait_time: 200ms
+
+  - platform: gpio
+    pin: 33
+    name: "Mischer Zu"
+    id: mischer_zu
+    interlock: [mischer_auf]
+    interlock_wait_time: 200ms
+
+  - platform: template
+    name: "Mischer Override aktiv"
+    id: override_aktiv
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - script.stop: regelung
+      - script.stop: fahre_auf
+      - script.stop: fahre_zu
+      - switch.turn_off: mischer_auf
+      - switch.turn_off: mischer_zu
+      - logger.log: "Override aktiviert – Automatik gestoppt"
+    on_turn_off:
+      - logger.log: "Override deaktiviert – Automatik läuft wieder"
+
+select:
+  - platform: template
+    name: "Mischer Override Richtung"
+    id: override_richtung
+    optimistic: true
+    options:
+      - "STOP"
+      - "AUF"
+      - "ZU"
+    initial_option: "STOP"
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(override_aktiv).state) return;
+            auto val = id(override_richtung).current_option();
+            if (val == "AUF") {
+              id(fahre_auf).execute();
+            } else if (val == "ZU") {
+              id(fahre_zu).execute();
+            } else {
+              id(mischer_auf).turn_off();
+              id(mischer_zu).turn_off();
+            }
+
+  
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+
+binary_sensor:
+  - platform: status
+    name: "Statussensor"
+    id: statussensor
+    
+  - platform: esp32_touch
+    name: "esp32touchpad"
+    id: "esp32touchpad"
+    pin: GPIO14
+    threshold: 110
+    on_press:
+      then:
+        - component.update: touch_raw_sensor
+  - platform: template
+    name: "Mischer Anschlag ZU"
+    id: anschlag_zu
+    lambda: return id(mischer_position_ms) <= 0;
+
+  - platform: template
+    name: "Mischer Anschlag AUF"
+    id: anschlag_auf
+    lambda: return id(mischer_position_ms) >= 120000;
+ 
+  - platform: homeassistant
+    id: ventil_offen
+    entity_id: binary_sensor.heizung_mindestens_ein_ventil_offen
+
+ 
+sensor:  
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: copy # Reports the WiFi signal strength in %
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "Signal %"
+    entity_category: "diagnostic"
+    device_class: ""
+  - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
+    index: 0
+    name: Ruecklauf
+    id: ruecklauf 
+    update_interval: never
+    state_class: measurement
+  - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
+    index: 1
+    name: RaumTemp
+    id: raumtemp 
+    update_interval: never
+    state_class: measurement
+  - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
+    index: 2
+    name: Zulauf
+    id: zulauf 
+    update_interval: never
+    state_class: measurement
+  - platform: dallas_temp
+#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
+    index: 3
+    name: Vorlauf
+    id: vorlauf 
+    update_interval: never
+    state_class: measurement
+  - platform: template
+    name: "Raw touch value"
+    id: touch_raw_sensor
+    device_class: "frequency"
+    unit_of_measurement: "kHz"
+    lambda: |-
+        return id(esp32touchpad).get_value();
+    update_interval: 30s
+  - platform: homeassistant
+    name: "Außentemperatur"
+    entity_id: sensor.tempext
+    id: aussentemp
+    state_class: measurement
+
+  # 2026-10-22 ÄNDERUNG Anfang: Raumtemperatur Wohnzimmer (Führungsraum), bewusst ungefiltert, ein Filter gehört zum echten Sensor in die äußere Regelung
+  # 2026-10-22 Die Quelle steht oben unter substitutions (raumtemp_quelle), beim Sensortausch nur dort ändern
+  - platform: homeassistant
+    name: "EGWZ Raumtemp"
+    id: egwz_raumtemp
+    entity_id: ${raumtemp_quelle}
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    # 2026-10-22 Sensoren der Plattform homeassistant sind standardmäßig intern, erst internal: false legt die Entität in HA an (stabiler Name samt Statistik über den Sensortausch hinweg)
+    internal: false
+  # 2026-10-22 ÄNDERUNG Ende: Raumtemperatur Wohnzimmer
+
+
+
+  - platform: homeassistant   
+    name: "Rollaktor1 Position (Ist)"
+    id: rollaktor1_position_ist
+    entity_id: cover.rollaktor1
+    attribute: current_position
+    state_class: measurement
+
+  - platform: template
+    name: "VL-RL Differenz"
+    id: vl_rl_diff
+    unit_of_measurement: "°C"
+    update_interval: never
+    lambda: |-
+      if (isnan(id(vorlauf).state) || isnan(id(ruecklauf).state)) return NAN;
+      return id(vorlauf).state - id(ruecklauf).state;
+
+  - platform: template
+    name: "Heizkurve Sollvorlauf"
+    id: soll_vorlauf
+    unit_of_measurement: "°C"
+    update_interval: never
+    state_class: measurement
+    device_class: temperature
+    lambda: |-
+      if (isnan(id(aussentemp).state)) return NAN;
+      float x = id(aussentemp).state;
+      float N = id(hk_neigung).state;
+      float L = id(hk_offset).state;
+      float a = -0.015625f * N;
+      float b = -0.9375f * N + 0.05f;
+      float c = 25.0f * N + 21.0f;
+      float u = (20.0f * x) / L;  // (20*x)/L
+      return a * u * u + b * u + c + (L - 20.0f);
+
+  - platform: template
+    name: "Vorlauf Trend"
+    id: vl_trend
+    unit_of_measurement: "°C/3min"
+    update_interval: never
+    state_class: measurement
+    lambda: |-
+      if (id(puffer_gefuellt) < 12) return NAN;
+      float werte[12] = {
+        id(vl_h0),  id(vl_h1),  id(vl_h2),
+        id(vl_h3),  id(vl_h4),  id(vl_h5),
+        id(vl_h6),  id(vl_h7),  id(vl_h8),
+        id(vl_h9),  id(vl_h10), id(vl_h11)
+      };
+      int idx = id(vl_idx);
+      // 2026-10-12 ÄNDERUNG Anfang: Indizes korrigiert, vl_idx zeigt nach puffer_schreiben auf den ältesten Wert, der neueste liegt davor
+      float aeltester = werte[idx];
+      float neuester  = werte[(idx + 11) % 12];
+      // 2026-10-12 ÄNDERUNG Ende: Indizes korrigiert
+      return neuester - aeltester;
+
+  - platform: template
+    name: "Mischer Position"
+    id: mischer_position
+    unit_of_measurement: "%"
+    update_interval: never
+    state_class: measurement
+    lambda: |-
+      return (float)id(mischer_position_ms) / 1200.0;
+
+  - platform: template
+    name: "Mischer Anschlag"
+    id: mischer_anschlag
+    update_interval: never
+    lambda: |-
+      int pos = id(mischer_position_ms);
+      if (pos <= 0) return 1.0;    // Anschlag ZU
+      if (pos >= 120000) return 2.0; // Anschlag AUF
+      return 0.0;                   // frei
+
+  - platform: template
+    name: "Mischer Letzte Priorität"
+    id: mischer_letzte_prioritaet
+    update_interval: never
+    state_class: measurement
+    lambda: |-
+      return id(letzte_prioritaet);
+  
+  - platform: template
+    name: "PID Ausgang"
+    id: pid_ausgang_sensor
+    unit_of_measurement: "°C"
+    update_interval: never
+    state_class: measurement
+    lambda: return id(pid_letzter_ausgang);
+
+  - platform: template
+    name: "Sollvorlauf korrigiert"
+    id: sollvorlauf_korrigiert
+    unit_of_measurement: "°C"
+    update_interval: never
+    state_class: measurement
+    device_class: temperature
+    lambda: return id(soll_vl_korrigiert);
+
+  - platform: template
+    name: "Zulauf Trend"
+    id: zl_trend_sensor
+    unit_of_measurement: "°C/min"
+    update_interval: never
+    state_class: measurement
+    lambda: |-
+      if (id(zl_prev2) == 0.0f) return NAN;
+      return (id(zulauf).state - id(zl_prev2)) * 2.0f;  // °C/min bei 30s Fenster
+
+  
+script:
+
+  - id: ha_mischer_zu
+    mode: single
+    then:
+      - homeassistant.service:
+          service: cover.close_cover
+          data:
+            entity_id: cover.rollaktor1
+
+  - id: ha_mischer_auf
+    mode: single
+    then:
+      - homeassistant.service:
+          service: cover.open_cover
+          data:
+            entity_id: cover.rollaktor1
+
+  - id: ha_mischer_stop
+    mode: single
+    then:
+      - homeassistant.service:
+          service: cover.stop_cover
+          data:
+            entity_id: cover.rollaktor1
+
+
+  - id: fahre_zu
+    mode: single
+    then:
+      - lambda: |-
+          // fahre_zu, analog fahre_auf mit +
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
+          }
+          if (id(mischer_position_ms) <= 0) {
+            ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
+            return;
+          }
+          int schritt_ms  = id(override_aktiv).state ? (int)id(override_schrittweite).state : 3000;
+          int neue_pos_ms = max(0, id(mischer_position_ms) - schritt_ms);
+          int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
+          id(mischer_fahre_position).execute(ziel_pct);
+          id(mischer_position_ms) = neue_pos_ms;
+          id(letzte_fahrtrichtung) = -1;
+
+  - id: fahre_auf
+    mode: single
+    then:
+      - lambda: |-
+          // fahre_zu, analog fahre_auf mit +
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
+          }
+          if (id(mischer_position_ms) <= 0) {
+            ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
+            return;
+          }
+          int schritt_ms  = id(override_aktiv).state ? (int)id(override_schrittweite).state : 3000;
+          int neue_pos_ms = max(0, id(mischer_position_ms) + schritt_ms);
+          int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
+          id(mischer_fahre_position).execute(ziel_pct);
+          id(mischer_position_ms) = neue_pos_ms;
+          id(letzte_fahrtrichtung) = +1;
+ 
+  - id: mischer_fahre_position
+    mode: restart
+    parameters:
+      zielposition: int
+    then:
+      - homeassistant.service:
+          service: cover.set_cover_position
+          data:
+            entity_id: cover.rollaktor1
+          variables:
+            ziel_var: !lambda 'return zielposition;'
+          data_template:
+            position: '{{ ziel_var }}'
+ 
+  - id: puffer_schreiben
+    mode: single
+    then:
+      - lambda: |-
+          if (isnan(id(vorlauf).state)) return;
+          int idx = id(vl_idx);
+          float val = id(vorlauf).state;
+
+          switch(idx) {
+            case  0: id(vl_h0)  = val; break;
+            case  1: id(vl_h1)  = val; break;
+            case  2: id(vl_h2)  = val; break;
+            case  3: id(vl_h3)  = val; break;
+            case  4: id(vl_h4)  = val; break;
+            case  5: id(vl_h5)  = val; break;
+            case  6: id(vl_h6)  = val; break;
+            case  7: id(vl_h7)  = val; break;
+            case  8: id(vl_h8)  = val; break;
+            case  9: id(vl_h9)  = val; break;
+            case 10: id(vl_h10) = val; break;
+            case 11: id(vl_h11) = val; break;
+          }
+          id(vl_idx) = (idx + 1) % 12;
+          if (id(puffer_gefuellt) < 12)
+            id(puffer_gefuellt) = id(puffer_gefuellt) + 1;
+          // Zulauf-Historie schieben
+          id(zl_prev2) = id(zl_prev1);
+          id(zl_prev1) = id(zulauf).state;
+
+
+  - id: regelung
+    mode: single
+    then:
+      - lambda: |-
+
+
+          // Sicherheitschecks
+          id(letzte_prioritaet) = 100;
+          if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der boot abgeschlossen.
+          id(letzte_prioritaet) = 99;
+          if (id(override_aktiv).state) return;
+          id(letzte_prioritaet) = 98;
+          id(letzte_prioritaet) = 97;
+          id(letzte_prioritaet) = 96;
+          if (isnan(id(vorlauf).state))    return;
+          id(letzte_prioritaet) = 95;
+          if (isnan(id(ruecklauf).state))  return;
+          id(letzte_prioritaet) = 94;
+          if (isnan(id(aussentemp).state)) return;
+          id(letzte_prioritaet) = 93;
+          if (isnan(id(zulauf).state))     return;
+          id(letzte_prioritaet) = 92;
+          if (isnan(id(soll_vorlauf).state)) return;
+          id(letzte_prioritaet) = 91;
+
+          ESP_LOGI("regelung", "Sicherheitschecks beendet");
+
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
+          }
+
+          float vl  = id(vorlauf).state;
+          float rl  = id(ruecklauf).state;
+          float at  = id(aussentemp).state;
+          float zl  = id(zulauf).state;
+          if (rl > vl) rl = vl - 0.1f;
+          float diff = vl - rl;
+
+          // -------------------------------------------------------
+          // BLOCK 1: Alle Berechnungen (immer ausführen)
+          // -------------------------------------------------------
+
+          // Heizkurve + Spreizungskorrektur
+          float soll_vl = id(soll_vorlauf).state;
+          float spreizungsfehler = diff - 12.0f;
+          float spreizungskorrektur = max(-5.0f, min(5.0f, spreizungsfehler * 0.5f));
+          // Wir nehmen die Spreizungskorrektur mal raus. Sinnhaftigkeit ist nicht gesichert.
+          //soll_vl = soll_vl + spreizungskorrektur;
+          id(soll_vl_korrigiert) = soll_vl;
+          ESP_LOGD("regelung", "AT=%.1f -> Soll-VL=%.1f; Spreizung=%.1f -> Korrektur=%.1f -> korr. Soll=%.1f; Ist-VL=%.1f",
+                   at, id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl, vl);
+
+          // 2026-10-12 ÄNDERUNG Anfang: PID durch Integrator mit Prädiktion ersetzt (Ki, Kd, Feedforward und alte Positionsrechnung entfallen)
+          // 2026-10-12 Position des Mischers in % (aus dem Rollaktor-Ist, siehe oben)
+          float pos_ist = id(mischer_position_ms) / 1200.0f;
+          // 2026-10-12 Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen
+          if (fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
+            id(pos_ziel) = pos_ist;
+          }
+          // 2026-10-12 Vorlauftrend (K pro ca. 3 min) fortschreiben, damit die Totzeit der Strecke berücksichtigt wird
+          float trend   = isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;
+          float vl_pred = vl + trend * id(vl_horizont).state;
+          float fehler  = soll_vl - vl_pred;
+          // 2026-10-12 Geloggt wird als "PID Ausgang" jetzt der Prädiktionsfehler in K
+          id(pid_letzter_ausgang) = fehler;
+          ESP_LOGD("regelung", "VL=%.1f Trend=%.2f -> VL-Prognose=%.1f; Soll=%.1f -> Fehler=%.2f; Pos-Ist=%.1f%% Pos-Ziel=%.1f%%",
+                   vl, trend, vl_pred, soll_vl, fehler, pos_ist, id(pos_ziel));
+          // 2026-10-12 ÄNDERUNG Ende: PID durch Integrator mit Prädiktion ersetzt
+
+          ESP_LOGI("regelung", "Berechnungen abgeschlossen");
+
+          // -------------------------------------------------------
+          // BLOCK 2: Prioritäten und Aktionen
+          // -------------------------------------------------------
+
+          // PRIORITÄT 0: Alle Ventile geschlossen
+          if (!id(ventil_offen).state) {
+            id(letzte_prioritaet) = 80;
+            ESP_LOGI("regelung", "P80 Alle Ventile zu -> Regelung pausiert");
+            id(pid_integral) = 0.0f;
+            // 2026-10-12 ÄNDERUNG Anfang: bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt
+            // 2026-10-12 Bei kaltem Zulauf bleibt es beim bisherigen Verhalten (Mischer anhalten, Position halten)
+            if (zl - soll_vl > 15.0f) {
+              int start = (int) roundf(id(pos_start).state);
+              id(pos_ziel) = (float) start;
+              if (fabsf(pos_ist - (float) start) > 2.0f) {
+                id(mischer_fahre_position).execute(start);
+                id(mischer_position_ms) = start * 1200;
+              }
+            } else {
+              id(ha_mischer_stop).execute();
+            }
+            // 2026-10-12 ÄNDERUNG Ende: Startposition bei P80
+            return;
+          }
+
+          // PRIORITÄT 1: Heizgrenze
+          if (at >= id(heizgrenze_at).state) {
+            id(letzte_prioritaet) = 70;
+            ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
+            id(pid_integral) = 0.0f;
+            id(ha_mischer_stop).execute();
+            id(ha_mischer_zu).execute();
+            return;
+          }
+
+          // PRIORITÄT 2: Vorlauf-Max Schutz
+          if (vl >= id(vorlauf_max).state) {
+            id(letzte_prioritaet) = 60;
+            ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
+            id(pid_integral) = 0.0f;
+            id(ha_mischer_stop).execute();
+            id(ha_mischer_zu).execute();
+            return;
+          }
+
+          // PRIORITÄT 3: Kessel-Schutz
+          if (zl < id(kessel_min).state) {
+            id(letzte_prioritaet) = 50;
+            ESP_LOGW("regelung", "P50: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
+            id(pid_integral) = 0.0f;
+            id(ha_mischer_stop).execute();
+            return;
+          }
+
+          // 2026-10-12 ÄNDERUNG Anfang: Totband auf dem Fehler (+-1 K) statt auf dem Positionsschritt, Zielposition als Float, Untergrenze im Regelbetrieb
+          const float totband = 1.0f;
+          if (fabsf(fehler) < totband) {
+            id(letzte_prioritaet) = 0;
+            ESP_LOGI("regelung", "P0: Fehler im Totband (%.2f K) -> nichts tun", fehler);
+            return;
+          }
+
+          // 2026-10-12 Positionsschritt pro Zyklus in %, begrenzt auf +-2 %
+          float delta = max(-2.0f, min(2.0f, id(pid_kp).state * fehler));
+          float pos_alt = id(pos_ziel);
+          // 2026-10-12 Die Untergrenze pos_min gilt nur nach unten, aus einer Stellung darunter wird nicht nach oben gezwungen
+          float untergrenze = min(id(pos_min).state, pos_alt);
+          id(pos_ziel) = max(untergrenze, min(100.0f, pos_alt + delta));
+          int ziel = (int) roundf(id(pos_ziel));
+          if (ziel == (int) roundf(pos_alt)) {
+            id(letzte_prioritaet) = 0;
+            ESP_LOGI("regelung", "P0: Zielposition %.2f%% -> noch %d%%, nichts zu senden", id(pos_ziel), ziel);
+            return;
+          }
+
+          id(letzte_prioritaet) = (delta > 0) ? 1 : -1;
+          ESP_LOGI("regelung", "P%d: Fehler=%.2f K -> Zielposition %d%% (Ist %.1f%%)",
+                   id(letzte_prioritaet), fehler, ziel, pos_ist);
+          id(mischer_fahre_position).execute(ziel);
+          id(mischer_position_ms) = ziel * 1200;
+          id(letzte_fahrtrichtung) = (delta > 0) ? 1 : -1;
+          // 2026-10-12 ÄNDERUNG Ende: Totband auf dem Fehler, Float-Zielposition, Untergrenze
+
+interval:
+  - interval: 15s
+    then:
+      - logger.log: 'Dallas'
+      - component.update: raumtemp
+      - component.update: zulauf
+      - component.update: ruecklauf
+      - component.update: vorlauf
+      - delay: 850ms        # warten bis Dallas-Konversion fertig
+      - component.update: vl_rl_diff
+      - logger.log: 'Puffer'
+      - script.execute: puffer_schreiben
+      - script.wait: puffer_schreiben
+      - logger.log: 'Trend'
+      - component.update: zl_trend_sensor
+      - component.update: vl_trend      
+      - component.update: soll_vorlauf      
+      - logger.log: 'Regelung'
+      - script.execute: regelung
+      - script.wait: regelung
+      - logger.log: 'Result'
+      - component.update: mischer_letzte_prioritaet      
+      - component.update: pid_ausgang_sensor
+      - component.update: sollvorlauf_korrigiert
+      - component.update: mischer_position
+      - component.update: mischer_anschlag
+      - homeassistant.event:
+          event: esphome.heizung_messung
+          data:
+            vorlauf: !lambda "return id(vorlauf).state;"
+            ruecklauf: !lambda "return id(ruecklauf).state;"
+            zulauf: !lambda "return id(zulauf).state;"
+            soll_vl: !lambda "return id(soll_vorlauf).state;"
+            pid_ausgang: !lambda "return id(pid_letzter_ausgang);"
+            mischer_pos: !lambda "return id(mischer_position_ms) / 1200.0;"
+            prioritaet: !lambda "return id(letzte_prioritaet);"
+            vl_rl_diff: !lambda "return id(vorlauf).state - id(ruecklauf).state;"
+            zl_trend: !lambda "return (id(zl_prev2) > 0.0f) ? (id(zulauf).state - id(zl_prev2)) * 2.0f : 0.0f;"
+            aussentemp: !lambda "return id(aussentemp).state;"
+            # 2026-10-12 ÄNDERUNG Anfang: zusätzliche Logwerte (in der CSV-Automation hinten anhängen)
+            pos_ist: !lambda "return isnan(id(rollaktor1_position_ist).state) ? -1.0f : id(rollaktor1_position_ist).state;"
+            vl_trend: !lambda "return isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;"
+            # 2026-10-12 ÄNDERUNG Ende: zusätzliche Logwerte
+            # 2026-10-14 ÄNDERUNG Anfang: Override-Status und Zielposition des Rollaktors mitloggen
+            override: !lambda "return id(override_aktiv).state ? 1 : 0;"
+            pos_ziel: !lambda "return id(pos_ziel);"
+            
+            # 2026-10-22 ÄNDERUNG Anfang: Raumtemperatur Wohnzimmer mitloggen (als letzte Spalte der CSV)
+            egwz_raumtemp: !lambda "return id(egwz_raumtemp).state;"
+            # 2026-10-22 ÄNDERUNG Ende: Raumtemperatur Wohnzimmer mitloggen            
+            
+            
+            # 2026-10-14 ÄNDERUNG Ende: Override-Status und Zielposition            
+# Das csv-log kann unter codesandbox.io, login holger.g.ullrich@googlemail.com, analysiert werden. saucool.
+# im terminal mit npm run dev
