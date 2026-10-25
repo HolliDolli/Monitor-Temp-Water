@@ -1,6 +1,8 @@
 # 2026-10-22 ÄNDERUNG Anfang: Quelle der Raumtemperatur an einer Stelle, Tausch gegen den echten Raumsensor = nur diese Zeile ändern
 substitutions:
-  raumtemp_quelle: sensor.grp_wz_int0000003_temperature
+  # 2026-10-25 ÄNDERUNG Anfang: Raumtemperatur jetzt aus dem Template-Helper EGWZ-Temp-Mittel (Mittel KL1+KL2, sonst einer davon, sonst Thermostat-Gruppe)
+  raumtemp_quelle: sensor.egwz_temp_mittel
+  # 2026-10-25 ÄNDERUNG Ende: Raumtemperatur aus EGWZ-Temp-Mittel
   # 2026-10-23 ÄNDERUNG Anfang: HZG Untergrenze der Raum-Solltemperatur (Absenkung), Frostschutz
   HZG_FROST_MIN: "12.0"
   # 2026-10-23 ÄNDERUNG Ende: HZG Untergrenze
@@ -39,7 +41,8 @@ esphome:
       - lambda: id(boot_fertig) = true;
       # 2026-10-23 ÄNDERUNG Anfang: HZG Powerbetrieb fällt nach einem Neustart auf Regelbetrieb zurück
       - lambda: |-
-          if (id(hzg_betriebsmodus).active_index().value_or(0) == 2) {
+          // 2026-10-25 ÄNDERUNG: auch der Modus Manuell (Index 3) fällt nach einem Neustart auf Regelbetrieb zurück
+          if (id(hzg_betriebsmodus).active_index().value_or(0) >= 2) {
             id(hzg_betriebsmodus).make_call().set_index(0).perform();
           }
       # 2026-10-23 ÄNDERUNG Ende: HZG Powerbetrieb nach Neustart
@@ -296,6 +299,17 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+  # 2026-10-25 ÄNDERUNG Anfang: Betriebsmodus Manuell (ersetzt den Schalter Mischer Override aktiv)
+  - id: hzg_manuell_start
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  # 2026-10-25 Vorlauf-Max im Modus Manuell ausgelöst, AUF erst 5 K darunter wieder erlaubt
+  - id: hzg_manuell_vlmax
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 2026-10-25 ÄNDERUNG Ende: Betriebsmodus Manuell
   # 2026-10-23 Korrektur: Vorlauf-Max im Powerbetrieb ausgelöst, erst 5 K darunter wieder öffnen
   - id: hzg_power_vlmax
     type: bool
@@ -481,6 +495,19 @@ number:
     optimistic: true
     restore_value: true
     unit_of_measurement: "min"
+
+  # 2026-10-25 ÄNDERUNG Anfang: Zeitlimit für den Modus Manuell, danach zurück in den Regelbetrieb
+  - platform: template
+    name: "HZG_Manuell_Dauer"
+    id: hzg_manuell_dauer
+    min_value: 10
+    max_value: 480
+    step: 10
+    initial_value: 120
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "min"
+  # 2026-10-25 ÄNDERUNG Ende: Zeitlimit Manuell
   # 2026-10-23 ÄNDERUNG Ende: HZG Einstellungen der Raumregelung
 
 # 2026-10-23 ÄNDERUNG Anfang: HZG Heizzeit (täglich, ohne Wochenendprofil)
@@ -540,20 +567,7 @@ switch:
     interlock: [mischer_auf]
     interlock_wait_time: 200ms
 
-  - platform: template
-    name: "Mischer Override aktiv"
-    id: override_aktiv
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    on_turn_on:
-      - script.stop: regelung
-      - script.stop: fahre_auf
-      - script.stop: fahre_zu
-      - switch.turn_off: mischer_auf
-      - switch.turn_off: mischer_zu
-      - logger.log: "Override aktiviert – Automatik gestoppt"
-    on_turn_off:
-      - logger.log: "Override deaktiviert – Automatik läuft wieder"
+  # 2026-10-25 ÄNDERUNG: Schalter "Mischer Override aktiv" entfernt, ersetzt durch den Betriebsmodus "Manuell" in HZG_Betriebsmodus
 
   # 2026-10-23 ÄNDERUNG Anfang: HZG Raumregelung ein/aus (aus = reine Heizkurve)
   - platform: template
@@ -576,8 +590,14 @@ select:
     on_value:
       then:
         - lambda: |-
-            if (!id(override_aktiv).state) return;
+            // 2026-10-25 ÄNDERUNG Anfang: wirkt nur im Betriebsmodus Manuell, AUF ist gesperrt solange Vorlauf-Max ausgelöst hat
+            if (!(id(hzg_betriebsmodus).active_index().value_or(0) == 3)) return;
             auto val = id(override_richtung).current_option();
+            if (val == "AUF" && id(hzg_manuell_vlmax)) {
+              ESP_LOGW("mischer", "Manuell: AUF gesperrt, Vorlauf-Max ausgelöst");
+              return;
+            }
+            // 2026-10-25 ÄNDERUNG Ende: nur im Modus Manuell
             if (val == "AUF") {
               id(fahre_auf).execute();
             } else if (val == "ZU") {
@@ -597,12 +617,25 @@ select:
       - "Regelbetrieb"
       - "Partybetrieb"
       - "Powerbetrieb"
+      # 2026-10-25 ÄNDERUNG: Modus Manuell (Index 3), ersetzt den Schalter Mischer Override aktiv
+      - "Manuell"
     initial_option: "Regelbetrieb"
     restore_value: true
     on_value:
       then:
         - lambda: |-
             if (i == 2) id(hzg_power_start) = millis();
+            // 2026-10-25 ÄNDERUNG Anfang: Modus Manuell, wie früher beim Einschalten des Override-Schalters die Automatik stoppen
+            if (i == 3) {
+              id(hzg_manuell_start) = millis();
+              id(regelung).stop();
+              id(fahre_auf).stop();
+              id(fahre_zu).stop();
+              id(mischer_auf).turn_off();
+              id(mischer_zu).turn_off();
+              ESP_LOGI("hzg", "Manuell aktiviert – Automatik gestoppt");
+            }
+            // 2026-10-25 ÄNDERUNG Ende: Modus Manuell
   # 2026-10-23 ÄNDERUNG Ende: HZG Betriebsmodus
 text_sensor:
   - platform: version
@@ -656,6 +689,7 @@ text_sensor:
         case 4: return std::string("Party");
         case 5: return std::string("Power");
         case 6: return std::string("Fallback");
+        case 7: return std::string("Manuell");  // 2026-10-25 ÄNDERUNG: Modus Manuell
         default: return std::string("Aus");
       }
   # 2026-10-23 ÄNDERUNG Ende: HZG Modus als Text
@@ -981,7 +1015,7 @@ script:
             ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
             return;
           }
-          int schritt_ms  = id(override_aktiv).state ? (int)id(override_schrittweite).state : 3000;
+          int schritt_ms  = (id(hzg_betriebsmodus).active_index().value_or(0) == 3) ? (int)id(override_schrittweite).state : 3000;  // 2026-10-25 ÄNDERUNG: Modus Manuell statt Override-Schalter
           int neue_pos_ms = max(0, id(mischer_position_ms) - schritt_ms);
           int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
           id(mischer_fahre_position).execute(ziel_pct);
@@ -1000,7 +1034,7 @@ script:
             ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
             return;
           }
-          int schritt_ms  = id(override_aktiv).state ? (int)id(override_schrittweite).state : 3000;
+          int schritt_ms  = (id(hzg_betriebsmodus).active_index().value_or(0) == 3) ? (int)id(override_schrittweite).state : 3000;  // 2026-10-25 ÄNDERUNG: Modus Manuell statt Override-Schalter
           int neue_pos_ms = max(0, id(mischer_position_ms) + schritt_ms);
           int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
           id(mischer_fahre_position).execute(ziel_pct);
@@ -1069,10 +1103,19 @@ script:
             id(hzg_betriebsmodus).make_call().set_index(0).perform();
             idx = 0;
           }
-          if (idx == 2) {
+          // 2026-10-25 ÄNDERUNG Anfang: Zeitlimit Modus Manuell, danach Regelbetrieb
+          if (idx == 3 && (uint32_t)(jetzt - id(hzg_manuell_start)) > (uint32_t)(id(hzg_manuell_dauer).state * 60000.0f)) {
+            id(hzg_betriebsmodus).make_call().set_index(0).perform();
+            idx = 0;
+          }
+          if (idx != 3) id(hzg_manuell_vlmax) = false;
+          // 2026-10-25 Power UND Manuell lösen die 2-h-Lernsperre aus (Raum von Hand beeinflusst)
+          if (idx == 2 || idx == 3) {
             id(hzg_power_zuletzt) = jetzt;
             id(hzg_power_gesehen) = true;
-          } else {
+          }
+          // 2026-10-25 ÄNDERUNG Ende: Zeitlimit Modus Manuell
+          if (idx != 2) {
             id(hzg_power_gesendet) = false;
             id(hzg_power_vlmax) = false;
           }
@@ -1130,6 +1173,7 @@ script:
           // 2026-10-23 Modus: 0 Aus, 1 Heizen, 2 Absenken, 3 Aufheizen, 4 Party, 5 Power, 6 Fallback
           int modus;
           if (idx == 2)                              modus = 5;
+          else if (idx == 3)                         modus = 7;   // 2026-10-25 ÄNDERUNG: Modus Manuell
           else if (!id(hzg_regelung_aktiv).state)    modus = 0;
           else if (!sensor_ok || !id(hzg_geladen))   modus = 6;
           else if (idx == 1)                         modus = 4;
@@ -1174,7 +1218,7 @@ script:
             // 2026-10-23 Fenster: kein Lernen bei offenem Fenster und bis 30 min nach dem Schließen (Lüften ist kein Heizbedarf)
             bool fenster_ruhe = !id(hzg_fenster_gesehen) || (uint32_t)(jetzt - id(hzg_fenster_ms)) > 1800000UL;
             bool power_nachlauf = id(hzg_power_gesehen) && (uint32_t)(jetzt - id(hzg_power_zuletzt)) < 7200000UL;
-            lern = (modus == 1 || modus == 4) && id(ventil_offen).state && !id(override_aktiv).state
+            lern = (modus == 1 || modus == 4) && id(ventil_offen).state && !(id(hzg_betriebsmodus).active_index().value_or(0) == 3)
                    && (pr == 0 || pr == 1 || pr == -1) && !power_nachlauf && id(hzg_geladen) && folgt && fenster_ruhe;
             if (lern) {
               float d = ALPHA_I * fehler;
@@ -1222,7 +1266,25 @@ script:
           id(letzte_prioritaet) = 100;
           if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der boot abgeschlossen.
           id(letzte_prioritaet) = 99;
-          if (id(override_aktiv).state) return;
+          // 2026-10-25 ÄNDERUNG Anfang: Modus Manuell statt Override-Schalter, Vorlauf-Max (P60) bleibt aktiv, Hysterese 5 K
+          if ((id(hzg_betriebsmodus).active_index().value_or(0) == 3)) {
+            float vlm = id(vorlauf).state;
+            if (!isnan(vlm) && vlm >= id(vorlauf_max).state && !id(hzg_manuell_vlmax)) {
+              id(hzg_manuell_vlmax) = true;
+              ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vlm);
+              id(ha_mischer_stop).execute();
+              id(ha_mischer_zu).execute();
+            }
+            if (id(hzg_manuell_vlmax)) {
+              if (!isnan(vlm) && vlm < id(vorlauf_max).state - 5.0f) {
+                id(hzg_manuell_vlmax) = false;
+              } else {
+                id(letzte_prioritaet) = 60;
+              }
+            }
+            return;
+          }
+          // 2026-10-25 ÄNDERUNG Ende: Modus Manuell
           id(letzte_prioritaet) = 98;
           id(letzte_prioritaet) = 97;
           id(letzte_prioritaet) = 96;
@@ -1468,7 +1530,7 @@ interval:
             egwz_raumtemp: !lambda "return id(egwz_raumtemp).state;"
             # 2026-10-22 ÄNDERUNG Ende: Raumtemperatur Wohnzimmer mitloggen
             # 2026-10-23 ÄNDERUNG Anfang: Stand deiner Version vom 14.10. (Override und Zielposition, falls bei dir schon vorhanden bitte nur eine Kopie behalten)
-            override: !lambda "return id(override_aktiv).state ? 1 : 0;"
+            override: !lambda "return (id(hzg_betriebsmodus).active_index().value_or(0) == 3) ? 1 : 0;"  # 2026-10-25 ÄNDERUNG: 1 im Modus Manuell
             pos_ziel: !lambda "return id(pos_ziel);"
             # 2026-10-23 ÄNDERUNG Ende: Stand deiner Version vom 14.10.
             # 2026-10-23 ÄNDERUNG Anfang: HZG Logwerte (in der CSV-Automation hinten anhängen, Reihenfolge wie hier)
