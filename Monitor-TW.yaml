@@ -1,12 +1,34 @@
 # 2026-10-22 ÄNDERUNG Anfang: Quelle der Raumtemperatur an einer Stelle, Tausch gegen den echten Raumsensor = nur diese Zeile ändern
 substitutions:
-  # 2026-10-25 ÄNDERUNG Anfang: Raumtemperatur jetzt aus dem Template-Helper EGWZ-Temp-Mittel (Mittel KL1+KL2, sonst einer davon, sonst Thermostat-Gruppe)
+  # 2026-10-25 ÄNDERUNG Anfang: Raumtemperatur aus dem Template-Helper EGWZ-Temp-Mittel (offsetkorrigiert, Ausfallreserve über egwz_mittel-helper in HA)
   raumtemp_quelle: sensor.egwz_temp_mittel
   # 2026-10-25 ÄNDERUNG Ende: Raumtemperatur aus EGWZ-Temp-Mittel
   # 2026-10-23 ÄNDERUNG Anfang: HZG Untergrenze der Raum-Solltemperatur (Absenkung), Frostschutz
   HZG_FROST_MIN: "12.0"
   # 2026-10-23 ÄNDERUNG Ende: HZG Untergrenze
 # 2026-10-22 ÄNDERUNG Ende: Quelle der Raumtemperatur
+  # 2026-10-25 ÄNDERUNG Anfang: Konstanten statt magischer Zahlen
+  # Betriebsmodus (Index im Select HZG_Betriebsmodus, Reihenfolge der Optionen nicht ändern)
+  BETRIEBSMODUS: "id(hzg_betriebsmodus).active_index().value_or(0)"
+  BM_REGEL: "0"
+  BM_PARTY: "1"
+  BM_POWER: "2"
+  BM_MANUELL: "3"
+  # Interner Zustand der Raumregelung (HZG_Modus)
+  ST_AUS: "0"
+  ST_HEIZEN: "1"
+  ST_ABSENKEN: "2"
+  ST_AUFHEIZEN: "3"
+  ST_PARTY: "4"
+  ST_POWER: "5"
+  ST_FALLBACK: "6"
+  ST_MANUELL: "7"
+  # Dallas-Bus: erwartete Anzahl Fühler (Index 0 Rücklauf, 1 RaumTemp Keller, 2 Zulauf, 3 Vorlauf) und Wartezeit für die Konversion
+  DALLAS_ANZAHL: "4"
+  DALLAS_WARTEZEIT: "850ms"
+  # Ringpuffer Vorlauf: 12 Werte à 15 s = 3 min
+  VL_PUFFER: "12"
+  # 2026-10-25 ÄNDERUNG Ende: Konstanten
 
 esp32:
   board: lolin32_lite
@@ -21,29 +43,23 @@ esphome:
     then:
       - logger.log: 'HTMon boot triggered'
       - switch.turn_on: LEDint
-      # Mischer init, bruachen wir nicht mehr, haben ja jetzt echte Position
-      #- logger.log: "Boot: Mischer wird komplett zugefahren"
-      #- wait_until:
-      #    api.connected:
-      #- delay: 5000ms
-      #- logger.log: "API verbunden, fahre Mischer zu"
-      #- homeassistant.service:
-      #    service: cover.close_cover
-      #    data:
-      #      entity_id: cover.rollaktor1
-      #- delay: 125000ms
-      #- homeassistant.service:
-      #    service: cover.stop_cover
-      #    data:
-      #      entity_id: cover.rollaktor1
-      #- lambda: id(mischer_position_ms) = 0;
-      #- logger.log: "Boot: Mischer ist ganz zu, Position = 0"
+      # 2026-10-25 ÄNDERUNG Anfang: Dallas-Fühler zählen, bei falscher Anzahl Sensorfehler bis zum nächsten Neustart (Indizes wären verschoben)
+      - lambda: |-
+          int n = id(ow_bus)->get_devices().size();
+          if (n != ${DALLAS_ANZAHL}) {
+            id(dallas_anzahl_fehler) = true;
+            ESP_LOGE("dallas", "%d Fühler gefunden, erwartet ${DALLAS_ANZAHL} -> Sensorfehler, Regelung gesperrt", n);
+          } else {
+            ESP_LOGI("dallas", "%d Fühler gefunden", n);
+          }
+      # 2026-10-25 ÄNDERUNG Ende: Dallas-Fühler zählen
       - lambda: id(boot_fertig) = true;
       # 2026-10-23 ÄNDERUNG Anfang: HZG Powerbetrieb fällt nach einem Neustart auf Regelbetrieb zurück
       - lambda: |-
-          // 2026-10-25 ÄNDERUNG: auch der Modus Manuell (Index 3) fällt nach einem Neustart auf Regelbetrieb zurück
-          if (id(hzg_betriebsmodus).active_index().value_or(0) >= 2) {
-            id(hzg_betriebsmodus).make_call().set_index(0).perform();
+          // 2026-10-25 ÄNDERUNG: auch der Modus Manuell fällt nach einem Neustart auf Regelbetrieb zurück
+          int bm = ${BETRIEBSMODUS};
+          if (bm == ${BM_POWER} || bm == ${BM_MANUELL}) {
+            id(hzg_betriebsmodus).make_call().set_index(${BM_REGEL}).perform();
           }
       # 2026-10-23 ÄNDERUNG Ende: HZG Powerbetrieb nach Neustart
   on_shutdown:
@@ -76,78 +92,23 @@ ota:
   - platform: esphome
 
 # Enable Home Assistant API
-#
-# Achtung: Für Offlinekalender muss der API-Reboot auf 0s gesetzt werden, da die Tonne sonst alle 15 Minuten neu startet.
-#
 api:
-  reboot_timeout: 60min  # only enable this when creating an offline device; 0s=never reboot
+  reboot_timeout: 60min  # Neustart, wenn HA 60 min nicht verbunden ist; 0s = nie
 
-
-  
 time:
   - platform: homeassistant
     # 2026-10-23 ÄNDERUNG Anfang: HZG id für die Uhrzeit (Heizzeit)
     id: ha_time
     # 2026-10-23 ÄNDERUNG Ende: HZG id für die Uhrzeit
 
-sun:
-  latitude: 51.14°
-  longitude: 9.414°
-  
 globals:
-  - id: vl_h0
-    type: float
+  # 2026-10-25 ÄNDERUNG Anfang: Ringpuffer Vorlauf als Array statt 12 Einzelvariablen
+  - id: vl_hist
+    type: float[${VL_PUFFER}]
     restore_value: false
-    initial_value: '0.0'
-  - id: vl_h1
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h2
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h3
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h4
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h5
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h6
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h7
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h8
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h9
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h10
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: vl_h11
-    type: float
-    restore_value: false
-    initial_value: '0.0'
+    initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
+  # 2026-10-25 ÄNDERUNG Ende: Ringpuffer Vorlauf
   - id: vl_idx
-    type: int
-    restore_value: false
-    initial_value: '0'
-  - id: letzte_fahrtrichtung
     type: int
     restore_value: false
     initial_value: '0'
@@ -155,22 +116,16 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
-  - id: mischer_position_ms
-    type: int
+  # 2026-10-25 ÄNDERUNG Anfang: Mischerposition in % (ersetzt mischer_position_ms), Quelle ist das Ist des Rollaktors
+  - id: mischer_pos
+    type: float
     restore_value: false
-    initial_value: '0'  # 0 = ganz zu, 120000 = ganz auf
+    initial_value: '0.0'  # 0 = ganz zu, 100 = ganz auf
+  # 2026-10-25 ÄNDERUNG Ende: Mischerposition in %
   - id: letzte_prioritaet
     type: int
     restore_value: false
     initial_value: '0'  # 0 = nichts zu tun
-  - id: pid_integral
-    type: float
-    restore_value: false
-    initial_value: '0.0'
-  - id: pid_letzter_fehler
-    type: float
-    restore_value: false
-    initial_value: '0.0'
   - id: pid_letzter_ausgang
     type: float
     restore_value: false
@@ -179,10 +134,16 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
-  - id: soll_vl_korrigiert
-    type: float
+  # 2026-10-25 ÄNDERUNG Anfang: Sensorfehler der Dallas-Fühler (Anzahl beim Start falsch oder ein Fühler liefert NaN)
+  - id: dallas_anzahl_fehler
+    type: bool
     restore_value: false
-    initial_value: '0.0'  
+    initial_value: 'false'
+  - id: sensorfehler
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 2026-10-25 ÄNDERUNG Ende: Sensorfehler
   - id: zl_prev1
     type: float
     restore_value: false
@@ -261,7 +222,7 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
-  # 2026-10-23 0 Aus, 1 Heizen, 2 Absenken, 3 Aufheizen, 4 Party, 5 Power, 6 Fallback
+  # 2026-10-25 Werte siehe ST_* unter substitutions
   - id: hzg_modus_nr
     type: int
     restore_value: false
@@ -304,11 +265,6 @@ globals:
     type: uint32_t
     restore_value: false
     initial_value: '0'
-  # 2026-10-25 Vorlauf-Max im Modus Manuell ausgelöst, AUF erst 5 K darunter wieder erlaubt
-  - id: hzg_manuell_vlmax
-    type: bool
-    restore_value: false
-    initial_value: 'false'
   # 2026-10-25 ÄNDERUNG Ende: Betriebsmodus Manuell
   # 2026-10-23 Korrektur: Vorlauf-Max im Powerbetrieb ausgelöst, erst 5 K darunter wieder öffnen
   - id: hzg_power_vlmax
@@ -339,16 +295,7 @@ number:
     restore_value: true
     unit_of_measurement: "°C"
 
-  - platform: template
-    name: "Override Schrittweite ms"
-    id: override_schrittweite
-    min_value: 500
-    max_value: 30000
-    step: 500
-    initial_value: 3000
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "ms"
+  # 2026-10-25 ÄNDERUNG: Number "Override Schrittweite ms" entfernt (Handbetrieb läuft direkt über cover.rollaktor1 in HA)
 
   - platform: template
     name: "Trend Schwelle"
@@ -395,12 +342,11 @@ number:
     unit_of_measurement: "°C"
 
   # 2026-10-12 ÄNDERUNG Anfang: Kp ist jetzt die Positionsänderung in % pro 15-s-Zyklus und Kelvin Fehler (Startwert 0.1)
-  # 2026-10-12 ACHTUNG: restore_value stellt nach dem Flashen den alten Wert (0.5) wieder her, daher Kp einmalig in HA auf 0.1 setzen
   - platform: template
     name: "PID Kp"
     id: pid_kp
     min_value: 0.02
-    max_value: 0.3  # 2026-10-23 Kp-Bereich begrenzt (Stand deiner Version vom 14.10.)
+    max_value: 0.3
     step: 0.01
     initial_value: 0.1
     optimistic: true
@@ -537,6 +483,7 @@ esp32_touch:
 one_wire:
   - platform: gpio
     pin: GPIO26
+    id: ow_bus  # 2026-10-25 ÄNDERUNG: id für die Prüfung der Fühleranzahl beim Start
 
 output:
   - platform: gpio
@@ -551,23 +498,10 @@ switch:
     inverted: true
     restore_mode: ALWAYS_ON
   - platform: restart
-    name: "Monitor-TW Restart" 
-    
-  - platform: gpio
-    pin: 32
-    name: "Mischer Auf"
-    id: mischer_auf
-    interlock: [mischer_zu]
-    interlock_wait_time: 200ms
+    name: "Monitor-TW Restart"
 
-  - platform: gpio
-    pin: 33
-    name: "Mischer Zu"
-    id: mischer_zu
-    interlock: [mischer_auf]
-    interlock_wait_time: 200ms
-
-  # 2026-10-25 ÄNDERUNG: Schalter "Mischer Override aktiv" entfernt, ersetzt durch den Betriebsmodus "Manuell" in HZG_Betriebsmodus
+  # 2026-10-25 ÄNDERUNG: GPIO-Schalter "Mischer Auf"/"Mischer Zu" (Pin 32/33) und Schalter "Mischer Override aktiv" entfernt,
+  # 2026-10-25 der Mischer wird nur noch über cover.rollaktor1 in HA gefahren, Handbetrieb = Betriebsmodus "Manuell"
 
   # 2026-10-23 ÄNDERUNG Anfang: HZG Raumregelung ein/aus (aus = reine Heizkurve)
   - platform: template
@@ -577,37 +511,8 @@ switch:
     restore_mode: RESTORE_DEFAULT_OFF
   # 2026-10-23 ÄNDERUNG Ende: HZG Raumregelung ein/aus
 select:
-  - platform: template
-    name: "Mischer Override Richtung"
-    id: override_richtung
-    optimistic: true
-    options:
-      - "STOP"
-      - "AUF"
-      - "ZU"
-    initial_option: "STOP"
-    restore_value: true
-    on_value:
-      then:
-        - lambda: |-
-            // 2026-10-25 ÄNDERUNG Anfang: wirkt nur im Betriebsmodus Manuell, AUF ist gesperrt solange Vorlauf-Max ausgelöst hat
-            if (!(id(hzg_betriebsmodus).active_index().value_or(0) == 3)) return;
-            auto val = id(override_richtung).current_option();
-            if (val == "AUF" && id(hzg_manuell_vlmax)) {
-              ESP_LOGW("mischer", "Manuell: AUF gesperrt, Vorlauf-Max ausgelöst");
-              return;
-            }
-            // 2026-10-25 ÄNDERUNG Ende: nur im Modus Manuell
-            if (val == "AUF") {
-              id(fahre_auf).execute();
-            } else if (val == "ZU") {
-              id(fahre_zu).execute();
-            } else {
-              id(mischer_auf).turn_off();
-              id(mischer_zu).turn_off();
-            }
+  # 2026-10-25 ÄNDERUNG: Select "Mischer Override Richtung" entfernt (Handbetrieb direkt über cover.rollaktor1 in HA)
 
-  
   # 2026-10-23 ÄNDERUNG Anfang: HZG Betriebsmodus
   - platform: template
     name: "HZG_Betriebsmodus"
@@ -624,16 +529,12 @@ select:
     on_value:
       then:
         - lambda: |-
-            if (i == 2) id(hzg_power_start) = millis();
+            if (i == ${BM_POWER}) id(hzg_power_start) = millis();
             // 2026-10-25 ÄNDERUNG Anfang: Modus Manuell, wie früher beim Einschalten des Override-Schalters die Automatik stoppen
-            if (i == 3) {
+            if (i == ${BM_MANUELL}) {
               id(hzg_manuell_start) = millis();
               id(regelung).stop();
-              id(fahre_auf).stop();
-              id(fahre_zu).stop();
-              id(mischer_auf).turn_off();
-              id(mischer_zu).turn_off();
-              ESP_LOGI("hzg", "Manuell aktiviert – Automatik gestoppt");
+              ESP_LOGI("hzg", "Manuell aktiviert – Automatik gestoppt, Mischer von Hand über cover.rollaktor1");
             }
             // 2026-10-25 ÄNDERUNG Ende: Modus Manuell
   # 2026-10-23 ÄNDERUNG Ende: HZG Betriebsmodus
@@ -683,14 +584,14 @@ text_sensor:
     update_interval: never
     lambda: |-
       switch (id(hzg_modus_nr)) {
-        case 1: return std::string("Heizen");
-        case 2: return std::string("Absenken");
-        case 3: return std::string("Aufheizen");
-        case 4: return std::string("Party");
-        case 5: return std::string("Power");
-        case 6: return std::string("Fallback");
-        case 7: return std::string("Manuell");  // 2026-10-25 ÄNDERUNG: Modus Manuell
-        default: return std::string("Aus");
+        case ${ST_HEIZEN}:    return std::string("Heizen");
+        case ${ST_ABSENKEN}:  return std::string("Absenken");
+        case ${ST_AUFHEIZEN}: return std::string("Aufheizen");
+        case ${ST_PARTY}:     return std::string("Party");
+        case ${ST_POWER}:     return std::string("Power");
+        case ${ST_FALLBACK}:  return std::string("Fallback");
+        case ${ST_MANUELL}:   return std::string("Manuell");
+        default:              return std::string("Aus");
       }
   # 2026-10-23 ÄNDERUNG Ende: HZG Modus als Text
 binary_sensor:
@@ -709,12 +610,20 @@ binary_sensor:
   - platform: template
     name: "Mischer Anschlag ZU"
     id: anschlag_zu
-    lambda: return id(mischer_position_ms) <= 0;
+    lambda: return id(mischer_pos) <= 0.0f;  # 2026-10-25 ÄNDERUNG: Position in %
 
   - platform: template
     name: "Mischer Anschlag AUF"
     id: anschlag_auf
-    lambda: return id(mischer_position_ms) >= 120000;
+    lambda: return id(mischer_pos) >= 100.0f;  # 2026-10-25 ÄNDERUNG: Position in %
+
+  # 2026-10-25 ÄNDERUNG Anfang: Sensorfehler der Dallas-Fühler, Regelung steht (P97)
+  - platform: template
+    name: "HZG_Sensorfehler"
+    id: hzg_sensorfehler_bs
+    device_class: problem
+    lambda: return id(sensorfehler);
+  # 2026-10-25 ÄNDERUNG Ende: Sensorfehler
  
   - platform: homeassistant
     id: ventil_offen
@@ -748,29 +657,26 @@ sensor:
     unit_of_measurement: "Signal %"
     entity_category: "diagnostic"
     device_class: ""
+  # 2026-10-25 Fühler bewusst über index: fällt einer aus, stimmt die Anzahl nicht mehr -> Sensorfehler, Regelung steht (siehe on_boot und P97)
   - platform: dallas_temp
-#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 0
     name: Ruecklauf
     id: ruecklauf 
     update_interval: never
     state_class: measurement
   - platform: dallas_temp
-#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 1
     name: RaumTemp
     id: raumtemp 
     update_interval: never
     state_class: measurement
   - platform: dallas_temp
-#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 2
     name: Zulauf
     id: zulauf 
     update_interval: never
     state_class: measurement
   - platform: dallas_temp
-#    address: 0xd47b8b008607c028 # brauchen wir nicht mehr. gibt ja jetzt index :-)
     index: 3
     name: Vorlauf
     id: vorlauf 
@@ -845,18 +751,12 @@ sensor:
     update_interval: never
     state_class: measurement
     lambda: |-
-      if (id(puffer_gefuellt) < 12) return NAN;
-      float werte[12] = {
-        id(vl_h0),  id(vl_h1),  id(vl_h2),
-        id(vl_h3),  id(vl_h4),  id(vl_h5),
-        id(vl_h6),  id(vl_h7),  id(vl_h8),
-        id(vl_h9),  id(vl_h10), id(vl_h11)
-      };
+      // 2026-10-25 ÄNDERUNG: Ringpuffer als Array vl_hist
+      if (id(puffer_gefuellt) < ${VL_PUFFER}) return NAN;
       int idx = id(vl_idx);
-      // 2026-10-12 ÄNDERUNG Anfang: Indizes korrigiert, vl_idx zeigt nach puffer_schreiben auf den ältesten Wert, der neueste liegt davor
-      float aeltester = werte[idx];
-      float neuester  = werte[(idx + 11) % 12];
-      // 2026-10-12 ÄNDERUNG Ende: Indizes korrigiert
+      // vl_idx zeigt nach puffer_schreiben auf den ältesten Wert, der neueste liegt davor
+      float aeltester = id(vl_hist)[idx];
+      float neuester  = id(vl_hist)[(idx + ${VL_PUFFER} - 1) % ${VL_PUFFER}];
       return neuester - aeltester;
 
   - platform: template
@@ -866,17 +766,18 @@ sensor:
     update_interval: never
     state_class: measurement
     lambda: |-
-      return (float)id(mischer_position_ms) / 1200.0;
+      return id(mischer_pos);  // 2026-10-25 ÄNDERUNG: Position in %
 
   - platform: template
     name: "Mischer Anschlag"
     id: mischer_anschlag
     update_interval: never
     lambda: |-
-      int pos = id(mischer_position_ms);
-      if (pos <= 0) return 1.0;    // Anschlag ZU
-      if (pos >= 120000) return 2.0; // Anschlag AUF
-      return 0.0;                   // frei
+      // 2026-10-25 ÄNDERUNG: Position in %
+      float pos = id(mischer_pos);
+      if (pos <= 0.0f)   return 1.0;  // Anschlag ZU
+      if (pos >= 100.0f) return 2.0;  // Anschlag AUF
+      return 0.0;                     // frei
 
   - platform: template
     name: "Mischer Letzte Priorität"
@@ -901,7 +802,7 @@ sensor:
     update_interval: never
     state_class: measurement
     device_class: temperature
-    lambda: return id(soll_vl_korrigiert);
+    lambda: return id(hzg_soll_vl_eff);  # 2026-10-25 ÄNDERUNG: identisch mit HZG_Soll_VL, eigene Variable entfällt
 
   - platform: template
     name: "Zulauf Trend"
@@ -977,108 +878,48 @@ sensor:
     internal: false
   # 2026-10-23 ÄNDERUNG Ende: HZG Sensoren der Raumregelung
 script:
+  # 2026-10-25 ÄNDERUNG: homeassistant.service -> homeassistant.action (aktuelle Syntax); Skripte ha_mischer_auf, fahre_auf, fahre_zu entfernt
 
   - id: ha_mischer_zu
     mode: single
     then:
-      - homeassistant.service:
-          service: cover.close_cover
-          data:
-            entity_id: cover.rollaktor1
-
-  - id: ha_mischer_auf
-    mode: single
-    then:
-      - homeassistant.service:
-          service: cover.open_cover
+      - homeassistant.action:
+          action: cover.close_cover
           data:
             entity_id: cover.rollaktor1
 
   - id: ha_mischer_stop
     mode: single
     then:
-      - homeassistant.service:
-          service: cover.stop_cover
+      - homeassistant.action:
+          action: cover.stop_cover
           data:
             entity_id: cover.rollaktor1
 
-
-  - id: fahre_zu
-    mode: single
-    then:
-      - lambda: |-
-          // fahre_zu, analog fahre_auf mit +
-          if (!isnan(id(rollaktor1_position_ist).state)) {
-            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
-          }
-          if (id(mischer_position_ms) <= 0) {
-            ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
-            return;
-          }
-          int schritt_ms  = (id(hzg_betriebsmodus).active_index().value_or(0) == 3) ? (int)id(override_schrittweite).state : 3000;  // 2026-10-25 ÄNDERUNG: Modus Manuell statt Override-Schalter
-          int neue_pos_ms = max(0, id(mischer_position_ms) - schritt_ms);
-          int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
-          id(mischer_fahre_position).execute(ziel_pct);
-          id(mischer_position_ms) = neue_pos_ms;
-          id(letzte_fahrtrichtung) = -1;
-
-  - id: fahre_auf
-    mode: single
-    then:
-      - lambda: |-
-          // fahre_zu, analog fahre_auf mit +
-          if (!isnan(id(rollaktor1_position_ist).state)) {
-            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
-          }
-          if (id(mischer_position_ms) <= 0) {
-            ESP_LOGW("mischer", "Anschlag ZU erreicht, fahre nicht weiter");
-            return;
-          }
-          int schritt_ms  = (id(hzg_betriebsmodus).active_index().value_or(0) == 3) ? (int)id(override_schrittweite).state : 3000;  // 2026-10-25 ÄNDERUNG: Modus Manuell statt Override-Schalter
-          int neue_pos_ms = max(0, id(mischer_position_ms) + schritt_ms);
-          int ziel_pct    = (int)round(neue_pos_ms / 1200.0f);
-          id(mischer_fahre_position).execute(ziel_pct);
-          id(mischer_position_ms) = neue_pos_ms;
-          id(letzte_fahrtrichtung) = +1;
- 
   - id: mischer_fahre_position
     mode: restart
     parameters:
       zielposition: int
     then:
-      - homeassistant.service:
-          service: cover.set_cover_position
+      - homeassistant.action:
+          action: cover.set_cover_position
           data:
             entity_id: cover.rollaktor1
           variables:
             ziel_var: !lambda 'return zielposition;'
           data_template:
             position: '{{ ziel_var }}'
- 
+
   - id: puffer_schreiben
     mode: single
     then:
       - lambda: |-
           if (isnan(id(vorlauf).state)) return;
+          // 2026-10-25 ÄNDERUNG: Ringpuffer als Array vl_hist
           int idx = id(vl_idx);
-          float val = id(vorlauf).state;
-
-          switch(idx) {
-            case  0: id(vl_h0)  = val; break;
-            case  1: id(vl_h1)  = val; break;
-            case  2: id(vl_h2)  = val; break;
-            case  3: id(vl_h3)  = val; break;
-            case  4: id(vl_h4)  = val; break;
-            case  5: id(vl_h5)  = val; break;
-            case  6: id(vl_h6)  = val; break;
-            case  7: id(vl_h7)  = val; break;
-            case  8: id(vl_h8)  = val; break;
-            case  9: id(vl_h9)  = val; break;
-            case 10: id(vl_h10) = val; break;
-            case 11: id(vl_h11) = val; break;
-          }
-          id(vl_idx) = (idx + 1) % 12;
-          if (id(puffer_gefuellt) < 12)
+          id(vl_hist)[idx] = id(vorlauf).state;
+          id(vl_idx) = (idx + 1) % ${VL_PUFFER};
+          if (id(puffer_gefuellt) < ${VL_PUFFER})
             id(puffer_gefuellt) = id(puffer_gefuellt) + 1;
           // Zulauf-Historie schieben
           id(zl_prev2) = id(zl_prev1);
@@ -1097,25 +938,24 @@ script:
           const float ALPHA_I   = 0.0025f;   // Lernrate der Tabelle pro Zyklus und K Fehler (ca. 0,6 K/h je K)
           uint32_t jetzt = millis();
 
-          // 2026-10-23 Modus-Auswahl und Power-Zeitlimit
-          int idx = id(hzg_betriebsmodus).active_index().value_or(0);
-          if (idx == 2 && (uint32_t)(jetzt - id(hzg_power_start)) > (uint32_t)(id(hzg_power_dauer).state * 60000.0f)) {
-            id(hzg_betriebsmodus).make_call().set_index(0).perform();
-            idx = 0;
+          // 2026-10-23 Modus-Auswahl und Power-Zeitlimit (2026-10-25: Konstanten BM_* statt Zahlen)
+          int idx = ${BETRIEBSMODUS};
+          if (idx == ${BM_POWER} && (uint32_t)(jetzt - id(hzg_power_start)) > (uint32_t)(id(hzg_power_dauer).state * 60000.0f)) {
+            id(hzg_betriebsmodus).make_call().set_index(${BM_REGEL}).perform();
+            idx = ${BM_REGEL};
           }
           // 2026-10-25 ÄNDERUNG Anfang: Zeitlimit Modus Manuell, danach Regelbetrieb
-          if (idx == 3 && (uint32_t)(jetzt - id(hzg_manuell_start)) > (uint32_t)(id(hzg_manuell_dauer).state * 60000.0f)) {
-            id(hzg_betriebsmodus).make_call().set_index(0).perform();
-            idx = 0;
+          if (idx == ${BM_MANUELL} && (uint32_t)(jetzt - id(hzg_manuell_start)) > (uint32_t)(id(hzg_manuell_dauer).state * 60000.0f)) {
+            id(hzg_betriebsmodus).make_call().set_index(${BM_REGEL}).perform();
+            idx = ${BM_REGEL};
           }
-          if (idx != 3) id(hzg_manuell_vlmax) = false;
           // 2026-10-25 Power UND Manuell lösen die 2-h-Lernsperre aus (Raum von Hand beeinflusst)
-          if (idx == 2 || idx == 3) {
+          if (idx == ${BM_POWER} || idx == ${BM_MANUELL}) {
             id(hzg_power_zuletzt) = jetzt;
             id(hzg_power_gesehen) = true;
           }
           // 2026-10-25 ÄNDERUNG Ende: Zeitlimit Modus Manuell
-          if (idx != 2) {
+          if (idx != ${BM_POWER}) {
             id(hzg_power_gesendet) = false;
             id(hzg_power_vlmax) = false;
           }
@@ -1170,22 +1010,22 @@ script:
             id(hzg_aufheizen) = true;
           }
 
-          // 2026-10-23 Modus: 0 Aus, 1 Heizen, 2 Absenken, 3 Aufheizen, 4 Party, 5 Power, 6 Fallback
+          // 2026-10-23 Interner Zustand (2026-10-25: Konstanten ST_* statt Zahlen)
           int modus;
-          if (idx == 2)                              modus = 5;
-          else if (idx == 3)                         modus = 7;   // 2026-10-25 ÄNDERUNG: Modus Manuell
-          else if (!id(hzg_regelung_aktiv).state)    modus = 0;
-          else if (!sensor_ok || !id(hzg_geladen))   modus = 6;
-          else if (idx == 1)                         modus = 4;
-          else if (in_heizzeit)                      modus = 1;
-          else if (id(hzg_aufheizen))                modus = 3;
-          else                                       modus = 2;
+          if (idx == ${BM_POWER})                    modus = ${ST_POWER};
+          else if (idx == ${BM_MANUELL})             modus = ${ST_MANUELL};
+          else if (!id(hzg_regelung_aktiv).state)    modus = ${ST_AUS};
+          else if (!sensor_ok || !id(hzg_geladen))   modus = ${ST_FALLBACK};
+          else if (idx == ${BM_PARTY})               modus = ${ST_PARTY};
+          else if (in_heizzeit)                      modus = ${ST_HEIZEN};
+          else if (id(hzg_aufheizen))                modus = ${ST_AUFHEIZEN};
+          else                                       modus = ${ST_ABSENKEN};
 
           float soll_raum = wunsch;
-          if (modus == 2) soll_raum = max(FROST_MIN, wunsch - absenk);
+          if (modus == ${ST_ABSENKEN}) soll_raum = max(FROST_MIN, wunsch - absenk);
 
           // 2026-10-23 Aufheizzeit nachführen: Beim Übergang in die Heizzeit zu kalt = früher beginnen, deutlich zu warm = später
-          if (id(hzg_modus_prev) != 1 && modus == 1 && (id(hzg_modus_prev) == 2 || id(hzg_modus_prev) == 3)) {
+          if (modus == ${ST_HEIZEN} && (id(hzg_modus_prev) == ${ST_ABSENKEN} || id(hzg_modus_prev) == ${ST_AUFHEIZEN})) {
             float f = soll_raum - id(hzg_raum_f);
             if (f > 0.5f)       id(hzg_k_auf) = min(120.0f, id(hzg_k_auf) * 1.15f);
             else if (f < -0.3f) id(hzg_k_auf) = max(10.0f, id(hzg_k_auf) * 0.9f);
@@ -1198,7 +1038,7 @@ script:
           float fehler = sensor_ok ? (soll_raum - id(hzg_raum_f)) : 0.0f;
           bool lern = false;
           float at = id(aussentemp).state;
-          if ((modus == 1 || modus == 2 || modus == 3 || modus == 4) && !isnan(at)) {
+          if ((modus == ${ST_HEIZEN} || modus == ${ST_ABSENKEN} || modus == ${ST_AUFHEIZEN} || modus == ${ST_PARTY}) && !isnan(at)) {
             float p = (at + 10.0f) / 5.0f;
             p = max(0.0f, min(5.0f, p));
             int i0 = min(4, (int) p);
@@ -1218,7 +1058,7 @@ script:
             // 2026-10-23 Fenster: kein Lernen bei offenem Fenster und bis 30 min nach dem Schließen (Lüften ist kein Heizbedarf)
             bool fenster_ruhe = !id(hzg_fenster_gesehen) || (uint32_t)(jetzt - id(hzg_fenster_ms)) > 1800000UL;
             bool power_nachlauf = id(hzg_power_gesehen) && (uint32_t)(jetzt - id(hzg_power_zuletzt)) < 7200000UL;
-            lern = (modus == 1 || modus == 4) && id(ventil_offen).state && !(id(hzg_betriebsmodus).active_index().value_or(0) == 3)
+            lern = (modus == ${ST_HEIZEN} || modus == ${ST_PARTY}) && id(ventil_offen).state
                    && (pr == 0 || pr == 1 || pr == -1) && !power_nachlauf && id(hzg_geladen) && folgt && fenster_ruhe;
             if (lern) {
               float d = ALPHA_I * fehler;
@@ -1249,8 +1089,8 @@ script:
           condition:
             lambda: 'return id(hzg_save_noetig);'
           then:
-            - homeassistant.service:
-                service: input_text.set_value
+            - homeassistant.action:
+                action: input_text.set_value
                 data:
                   entity_id: input_text.hzg_lerntabelle
                   value: !lambda 'return id(hzg_save_str);'
@@ -1260,50 +1100,51 @@ script:
     mode: single
     then:
       - lambda: |-
-
-
           // Sicherheitschecks
           id(letzte_prioritaet) = 100;
-          if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der boot abgeschlossen.
+          if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der Boot abgeschlossen ist
+
+          // 2026-10-25 ÄNDERUNG Anfang: Mischerposition in % direkt aus dem Rollaktor-Ist (ersetzt mischer_position_ms), auch im Modus Manuell
+          if (!isnan(id(rollaktor1_position_ist).state)) {
+            id(mischer_pos) = id(rollaktor1_position_ist).state;
+          }
+          // 2026-10-25 ÄNDERUNG Ende: Mischerposition in %
+
+          // 2026-10-25 ÄNDERUNG Anfang: Sensorfehler = Fühleranzahl beim Start falsch oder einer der vier Dallas-Fühler liefert NaN
+          id(sensorfehler) = id(dallas_anzahl_fehler)
+                             || isnan(id(vorlauf).state) || isnan(id(ruecklauf).state)
+                             || isnan(id(zulauf).state)  || isnan(id(raumtemp).state);
+          // 2026-10-25 ÄNDERUNG Ende: Sensorfehler
+
           id(letzte_prioritaet) = 99;
-          // 2026-10-25 ÄNDERUNG Anfang: Modus Manuell statt Override-Schalter, Vorlauf-Max (P60) bleibt aktiv, Hysterese 5 K
-          if ((id(hzg_betriebsmodus).active_index().value_or(0) == 3)) {
+          // 2026-10-25 ÄNDERUNG Anfang: Modus Manuell, Mischer wird von Hand über cover.rollaktor1 gefahren.
+          // 2026-10-25 Vorlauf-Max (P60) bleibt aktiv: solange VL >= Max, in jedem Zyklus ZU (wie im Regelbetrieb)
+          if (${BETRIEBSMODUS} == ${BM_MANUELL}) {
             float vlm = id(vorlauf).state;
-            if (!isnan(vlm) && vlm >= id(vorlauf_max).state && !id(hzg_manuell_vlmax)) {
-              id(hzg_manuell_vlmax) = true;
-              ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vlm);
+            if (!isnan(vlm) && vlm >= id(vorlauf_max).state) {
+              id(letzte_prioritaet) = 60;
+              ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> ZU", vlm);
               id(ha_mischer_stop).execute();
               id(ha_mischer_zu).execute();
-            }
-            if (id(hzg_manuell_vlmax)) {
-              if (!isnan(vlm) && vlm < id(vorlauf_max).state - 5.0f) {
-                id(hzg_manuell_vlmax) = false;
-              } else {
-                id(letzte_prioritaet) = 60;
-              }
             }
             return;
           }
           // 2026-10-25 ÄNDERUNG Ende: Modus Manuell
-          id(letzte_prioritaet) = 98;
-          id(letzte_prioritaet) = 97;
-          id(letzte_prioritaet) = 96;
-          if (isnan(id(vorlauf).state))    return;
-          id(letzte_prioritaet) = 95;
-          if (isnan(id(ruecklauf).state))  return;
+
+          // 2026-10-25 ÄNDERUNG Anfang: P97 Sensorfehler, Regelung steht, Mischer bleibt in seiner Stellung
+          if (id(sensorfehler)) {
+            id(letzte_prioritaet) = 97;
+            ESP_LOGE("regelung", "P97: Sensorfehler Dallas-Fühler -> Regelung gesperrt");
+            return;
+          }
+          // 2026-10-25 ÄNDERUNG Ende: P97 Sensorfehler
           id(letzte_prioritaet) = 94;
           if (isnan(id(aussentemp).state)) return;
-          id(letzte_prioritaet) = 93;
-          if (isnan(id(zulauf).state))     return;
           id(letzte_prioritaet) = 92;
           if (isnan(id(soll_vorlauf).state)) return;
           id(letzte_prioritaet) = 91;
 
           ESP_LOGI("regelung", "Sicherheitschecks beendet");
-
-          if (!isnan(id(rollaktor1_position_ist).state)) {
-            id(mischer_position_ms) = (int)round(id(rollaktor1_position_ist).state * 1200.0f);
-          }
 
           float vl  = id(vorlauf).state;
           float rl  = id(ruecklauf).state;
@@ -1316,7 +1157,7 @@ script:
           // BLOCK 1: Alle Berechnungen (immer ausführen)
           // -------------------------------------------------------
 
-          // Heizkurve + Spreizungskorrektur
+          // Heizkurve
           float soll_vl = id(soll_vorlauf).state;
           // 2026-10-23 ÄNDERUNG Anfang: HZG Korrektur aus dem äußeren Kreis auf den Soll-Vorlauf aufschlagen (ohne Raumregelung ist hzg_korr = 0)
           if (id(hzg_korr) != 0.0f) {
@@ -1324,17 +1165,13 @@ script:
           }
           id(hzg_soll_vl_eff) = soll_vl;
           // 2026-10-23 ÄNDERUNG Ende: HZG Korrektur
-          float spreizungsfehler = diff - 12.0f;
-          float spreizungskorrektur = max(-5.0f, min(5.0f, spreizungsfehler * 0.5f));
-          // Wir nehmen die Spreizungskorrektur mal raus. Sinnhaftigkeit ist nicht gesichert.
-          //soll_vl = soll_vl + spreizungskorrektur;
-          id(soll_vl_korrigiert) = soll_vl;
-          ESP_LOGD("regelung", "AT=%.1f -> Soll-VL=%.1f; Spreizung=%.1f -> Korrektur=%.1f -> korr. Soll=%.1f; Ist-VL=%.1f",
-                   at, id(soll_vorlauf).state, diff, spreizungskorrektur, soll_vl, vl);
+          // 2026-10-25 ÄNDERUNG: ungenutzte Spreizungskorrektur entfernt
+          ESP_LOGD("regelung", "AT=%.1f -> Soll-VL Heizkurve=%.1f, Soll-VL=%.1f; Spreizung=%.1f; Ist-VL=%.1f",
+                   at, id(soll_vorlauf).state, soll_vl, diff, vl);
 
           // 2026-10-12 ÄNDERUNG Anfang: PID durch Integrator mit Prädiktion ersetzt (Ki, Kd, Feedforward und alte Positionsrechnung entfallen)
           // 2026-10-12 Position des Mischers in % (aus dem Rollaktor-Ist, siehe oben)
-          float pos_ist = id(mischer_position_ms) / 1200.0f;
+          float pos_ist = id(mischer_pos);
           // 2026-10-12 Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen
           if (fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
             id(pos_ziel) = pos_ist;
@@ -1356,7 +1193,7 @@ script:
           // -------------------------------------------------------
 
           // 2026-10-23 ÄNDERUNG Anfang: HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht
-          if (id(hzg_betriebsmodus).active_index().value_or(0) == 2) {
+          if (${BETRIEBSMODUS} == ${BM_POWER}) {
             // 2026-10-23 Korrektur: Hysterese 5 K, damit der Mischer nicht zwischen ZU und 100 % pendelt
             if (vl >= id(vorlauf_max).state && !id(hzg_power_vlmax)) {
               id(hzg_power_vlmax) = true;
@@ -1385,8 +1222,7 @@ script:
             if (!id(hzg_power_gesendet)) {
               ESP_LOGI("regelung", "P85: Powerbetrieb -> Mischer auf 100%% (Ist %.1f%%)", pos_ist);
               id(mischer_fahre_position).execute(100);
-              id(mischer_position_ms) = 120000;
-              id(letzte_fahrtrichtung) = 1;
+              id(mischer_pos) = 100.0f;
               id(hzg_power_gesendet) = true;
             }
             return;
@@ -1396,7 +1232,6 @@ script:
           if (!id(ventil_offen).state) {
             id(letzte_prioritaet) = 80;
             ESP_LOGI("regelung", "P80 Alle Ventile zu -> Regelung pausiert");
-            id(pid_integral) = 0.0f;
             // 2026-10-12 ÄNDERUNG Anfang: bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt
             // 2026-10-12 Bei kaltem Zulauf bleibt es beim bisherigen Verhalten (Mischer anhalten, Position halten)
             if (zl - soll_vl > 15.0f) {
@@ -1404,7 +1239,7 @@ script:
               id(pos_ziel) = (float) start;
               if (fabsf(pos_ist - (float) start) > 2.0f) {
                 id(mischer_fahre_position).execute(start);
-                id(mischer_position_ms) = start * 1200;
+                id(mischer_pos) = (float) start;
               }
             } else {
               id(ha_mischer_stop).execute();
@@ -1417,7 +1252,6 @@ script:
           if (at >= id(heizgrenze_at).state) {
             id(letzte_prioritaet) = 70;
             ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
-            id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             id(ha_mischer_zu).execute();
             return;
@@ -1427,7 +1261,6 @@ script:
           if (vl >= id(vorlauf_max).state) {
             id(letzte_prioritaet) = 60;
             ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
-            id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             id(ha_mischer_zu).execute();
             return;
@@ -1437,7 +1270,6 @@ script:
           if (zl < id(kessel_min).state) {
             id(letzte_prioritaet) = 50;
             ESP_LOGW("regelung", "P50: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
-            id(pid_integral) = 0.0f;
             id(ha_mischer_stop).execute();
             return;
           }
@@ -1467,8 +1299,7 @@ script:
           ESP_LOGI("regelung", "P%d: Fehler=%.2f K -> Zielposition %d%% (Ist %.1f%%)",
                    id(letzte_prioritaet), fehler, ziel, pos_ist);
           id(mischer_fahre_position).execute(ziel);
-          id(mischer_position_ms) = ziel * 1200;
-          id(letzte_fahrtrichtung) = (delta > 0) ? 1 : -1;
+          id(mischer_pos) = (float) ziel;
           // 2026-10-12 ÄNDERUNG Ende: Totband auf dem Fehler, Float-Zielposition, Untergrenze
 
 interval:
@@ -1479,7 +1310,7 @@ interval:
       - component.update: zulauf
       - component.update: ruecklauf
       - component.update: vorlauf
-      - delay: 850ms        # warten bis Dallas-Konversion fertig
+      - delay: ${DALLAS_WARTEZEIT}  # warten bis Dallas-Konversion fertig
       - component.update: vl_rl_diff
       - logger.log: 'Puffer'
       - script.execute: puffer_schreiben
@@ -1517,7 +1348,7 @@ interval:
             zulauf: !lambda "return id(zulauf).state;"
             soll_vl: !lambda "return id(soll_vorlauf).state;"
             pid_ausgang: !lambda "return id(pid_letzter_ausgang);"
-            mischer_pos: !lambda "return id(mischer_position_ms) / 1200.0;"
+            mischer_pos: !lambda "return id(mischer_pos);"  # 2026-10-25 ÄNDERUNG: Position in %
             prioritaet: !lambda "return id(letzte_prioritaet);"
             vl_rl_diff: !lambda "return id(vorlauf).state - id(ruecklauf).state;"
             zl_trend: !lambda "return (id(zl_prev2) > 0.0f) ? (id(zulauf).state - id(zl_prev2)) * 2.0f : 0.0f;"
@@ -1529,10 +1360,10 @@ interval:
             # 2026-10-22 ÄNDERUNG Anfang: Raumtemperatur Wohnzimmer mitloggen (als letzte Spalte der CSV)
             egwz_raumtemp: !lambda "return id(egwz_raumtemp).state;"
             # 2026-10-22 ÄNDERUNG Ende: Raumtemperatur Wohnzimmer mitloggen
-            # 2026-10-23 ÄNDERUNG Anfang: Stand deiner Version vom 14.10. (Override und Zielposition, falls bei dir schon vorhanden bitte nur eine Kopie behalten)
-            override: !lambda "return (id(hzg_betriebsmodus).active_index().value_or(0) == 3) ? 1 : 0;"  # 2026-10-25 ÄNDERUNG: 1 im Modus Manuell
+            # 2026-10-23 ÄNDERUNG Anfang: Override (Modus Manuell) und Zielposition
+            override: !lambda "return (${BETRIEBSMODUS} == ${BM_MANUELL}) ? 1 : 0;"  # 2026-10-25 ÄNDERUNG: 1 im Modus Manuell
             pos_ziel: !lambda "return id(pos_ziel);"
-            # 2026-10-23 ÄNDERUNG Ende: Stand deiner Version vom 14.10.
+            # 2026-10-23 ÄNDERUNG Ende: Override und Zielposition
             # 2026-10-23 ÄNDERUNG Anfang: HZG Logwerte (in der CSV-Automation hinten anhängen, Reihenfolge wie hier)
             hzg_soll_raum: !lambda "return id(hzg_soll_raum);"
             hzg_korrektur: !lambda "return id(hzg_korr);"
