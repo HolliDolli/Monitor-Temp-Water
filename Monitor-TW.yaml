@@ -1233,8 +1233,9 @@ script:
           }
 
           // PRIORITÄT 4: Soll-VL unter dem Rücklauf, der Mischer kann ihn nicht erreichen -> ZU.
-          // Freigabe erst, wenn der Soll-VL 1 K über seinen kleinsten Wert seit dem Zufahren steigt
-          // (nicht über den RL, der kühlt nach dem Zufahren ab und würde Pendeln auslösen)
+          // Freigabe, wenn der Soll-VL 1 K über seinen kleinsten Wert seit dem Zufahren steigt
+          // oder der RL nach dem Zufahren mehr als 3 K unter den Soll-VL abgekühlt ist
+          // (Hysterese 3 K gegen Pendeln; nach dem Öffnen bleibt der RL unter dem VL, also unter dem Soll)
           if (!id(hzg_vl_unerreichbar) && soll_vl < rl) {
             id(hzg_vl_unerreichbar) = true;
             id(hzg_vl_unerreichbar_soll) = soll_vl;
@@ -1244,6 +1245,9 @@ script:
             if (soll_vl > id(hzg_vl_unerreichbar_soll) + 1.0f) {
               id(hzg_vl_unerreichbar) = false;
               ESP_LOGI("regelung", "P65: Soll-VL auf %.1f gestiegen -> Regelung frei", soll_vl);
+            } else if (soll_vl > rl + 3.0f) {
+              id(hzg_vl_unerreichbar) = false;
+              ESP_LOGI("regelung", "P65: RL %.1f mehr als 3 K unter Soll-VL %.1f -> Regelung frei", rl, soll_vl);
             }
           }
           if (id(hzg_vl_unerreichbar)) {
