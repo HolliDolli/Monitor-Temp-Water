@@ -264,6 +264,16 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
+  # Nach der P65-Freigabe: restliche Zyklen, in denen der Mischer auf die Startposition fährt (kein Angleichen an das Ist, kein Integrator)
+  - id: hzg_anfahr_zyklen
+    type: int
+    restore_value: false
+    initial_value: '0'
+  # Powerbetrieb war im letzten Zyklus aktiv: beim Verlassen Mischer auf die Startposition statt von 100 % herunterzuintegrieren
+  - id: hzg_power_war_aktiv
+    type: bool
+    restore_value: false
+    initial_value: 'false'
 number:
 
   - platform: template
@@ -286,18 +296,6 @@ number:
     optimistic: true
     restore_value: true
     unit_of_measurement: "°C"
-
-
-  - platform: template
-    name: "Trend Schwelle"
-    id: trend_schwelle
-    min_value: 0.1
-    max_value: 2.0
-    step: 0.1
-    initial_value: 0.5
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "°C/3min"
 
   - platform: template
     name: "Heizgrenze AT"
@@ -365,13 +363,14 @@ number:
     restore_value: true
     unit_of_measurement: "%"
 
+  # Startposition für P80 (Vorstellen bei heißem Zulauf) und nach der P65-Freigabe, typische Regelpositionen liegen bei 25-31 %
   - platform: template
     name: "Mischer Startposition"
     id: pos_start
     min_value: 0.0
     max_value: 100.0
     step: 1.0
-    initial_value: 60.0
+    initial_value: 30.0
     optimistic: true
     restore_value: true
     unit_of_measurement: "%"
@@ -512,11 +511,10 @@ select:
       then:
         - lambda: |-
             if (i == ${BM_POWER}) id(hzg_power_start) = millis();
-            // Modus Manuell: Automatik stoppen, Mischer wird von Hand gefahren
+            // Modus Manuell: Startzeitpunkt für das Zeitlimit, die Regelung selbst fängt den Modus ab
             if (i == ${BM_MANUELL}) {
               id(hzg_manuell_start) = millis();
-              id(regelung).stop();
-              ESP_LOGI("hzg", "Manuell aktiviert – Automatik gestoppt, Mischer von Hand über cover.rollaktor1");
+              ESP_LOGI("hzg", "Manuell aktiviert, Mischer von Hand über cover.rollaktor1");
             }
 text_sensor:
   - platform: version
@@ -670,6 +668,14 @@ sensor:
     entity_id: sensor.tempext
     id: aussentemp
     state_class: measurement
+    # Glättung: Wetterdienste springen (OWM pendelt alle 10-50 min um bis zu 2,7 K, met.no stündlich),
+    # jeder Sprung verschiebt den Soll-VL und kann P65 auslösen. HA sendet nur bei Änderung, daher
+    # heartbeat für gleichmäßige Abtastung (1/min), danach gleitendes 60-min-Mittel
+    filters:
+      - heartbeat: 60s
+      - sliding_window_moving_average:
+          window_size: 60
+          send_every: 1
 
   # Raumtemperatur Wohnzimmer (Führungsraum), bewusst ungefiltert, ein Filter gehört zum echten Sensor in die äußere Regelung
   # Die Quelle steht oben unter substitutions (raumtemp_quelle), beim Sensortausch nur dort ändern
@@ -934,7 +940,9 @@ script:
             id(hzg_fenster_gesehen) = true;
           }
 
-          // Raumtemperatur filtern, Sensor gilt bis 20 min nach dem letzten gültigen Wert
+          // Raumtemperatur filtern, Sensor gilt bis 20 min nach dem letzten gültigen Wert.
+          // HA sendet nur Änderungen, ein eingefrorener Wert bleibt daher gültig; erkannt wird nur NaN/unavailable
+          // (Ausfälle der Einzelsensoren fängt sensor.egwz_temp_mittel in HA selbst ab)
           float ist_roh = id(egwz_raumtemp).state;
           bool roh_ok = !isnan(ist_roh) && ist_roh > 5.0f && ist_roh < 35.0f;
           if (roh_ok) {
@@ -1122,10 +1130,8 @@ script:
 
           // Heizkurve
           float soll_vl = id(soll_vorlauf).state;
-          // HZG Korrektur aus dem äußeren Kreis auf den Soll-Vorlauf aufschlagen (ohne Raumregelung ist hzg_korr = 0)
-          if (id(hzg_korr) != 0.0f) {
-            soll_vl = max(20.0f, min(id(vorlauf_max).state - 2.0f, soll_vl + id(hzg_korr)));
-          }
+          // HZG Korrektur aus dem äußeren Kreis aufschlagen (ohne Raumregelung ist hzg_korr = 0), immer auf 20 °C .. VL-Max - 2 K begrenzen
+          soll_vl = max(20.0f, min(id(vorlauf_max).state - 2.0f, soll_vl + id(hzg_korr)));
           id(hzg_soll_vl_eff) = soll_vl;
           ESP_LOGD("regelung", "AT=%.1f -> Soll-VL Heizkurve=%.1f, Soll-VL=%.1f; Spreizung=%.1f; Ist-VL=%.1f",
                    at, id(soll_vorlauf).state, soll_vl, diff, vl);
@@ -1133,8 +1139,10 @@ script:
           // Integrator mit Prädiktion
           // Position des Mischers in % (aus dem Rollaktor-Ist, siehe oben)
           float pos_ist = id(mischer_pos);
-          // Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen
-          if (fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
+          // Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen,
+          // nicht während der Mischer nach der P65-Freigabe auf die Startposition fährt
+          if (id(hzg_anfahr_zyklen) > 0) id(hzg_anfahr_zyklen) -= 1;
+          if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
             id(pos_ziel) = pos_ist;
           }
           // Vorlauftrend (K pro ca. 3 min) fortschreiben, damit die Totzeit der Strecke berücksichtigt wird
@@ -1154,6 +1162,8 @@ script:
 
           // HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht
           if (${BETRIEBSMODUS} == ${BM_POWER}) {
+            id(hzg_power_war_aktiv) = true;
+            id(hzg_anfahr_zyklen) = 0;
             // Hysterese 5 K, damit der Mischer nicht zwischen ZU und 100 % pendelt
             if (vl >= id(vorlauf_max).state && !id(hzg_power_vlmax)) {
               id(hzg_power_vlmax) = true;
@@ -1187,13 +1197,30 @@ script:
             }
             return;
           }
+          // Powerbetrieb im letzten Zyklus beendet? Dann unten auf die Startposition springen
+          // (greift nur, wenn in diesem Zyklus keine der Schutzfunktionen den Mischer übernimmt)
+          bool power_ende = id(hzg_power_war_aktiv);
+          id(hzg_power_war_aktiv) = false;
+
+          // PRIORITÄT 1: Heizgrenze (vor P80, sonst stellt P80 den Mischer vor und P70 fährt ihn gleich wieder zu)
+          if (at >= id(heizgrenze_at).state) {
+            id(letzte_prioritaet) = 70;
+            id(hzg_anfahr_zyklen) = 0;
+            ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
+            id(ha_mischer_stop).execute();
+            id(ha_mischer_zu).execute();
+            return;
+          }
+
           // PRIORITÄT 0: Alle Ventile geschlossen
           if (!id(ventil_offen).state) {
             id(letzte_prioritaet) = 80;
+            id(hzg_anfahr_zyklen) = 0;
             ESP_LOGI("regelung", "P80 Alle Ventile zu -> Regelung pausiert");
-            // bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt
-            // Bei kaltem Zulauf Mischer anhalten, Position halten
-            if (zl - soll_vl > 15.0f) {
+            // bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt,
+            // nicht bei aktivem P65 (der Mischer würde nach dem Öffnen der Ventile sofort wieder zugefahren)
+            // Sonst Mischer anhalten, Position halten
+            if (zl - soll_vl > 15.0f && !id(hzg_vl_unerreichbar)) {
               int start = (int) roundf(id(pos_start).state);
               id(pos_ziel) = (float) start;
               if (fabsf(pos_ist - (float) start) > 2.0f) {
@@ -1206,18 +1233,10 @@ script:
             return;
           }
 
-          // PRIORITÄT 1: Heizgrenze
-          if (at >= id(heizgrenze_at).state) {
-            id(letzte_prioritaet) = 70;
-            ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
-            id(ha_mischer_stop).execute();
-            id(ha_mischer_zu).execute();
-            return;
-          }
-
           // PRIORITÄT 2: Vorlauf-Max Schutz
           if (vl >= id(vorlauf_max).state) {
             id(letzte_prioritaet) = 60;
+            id(hzg_anfahr_zyklen) = 0;
             ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
             id(ha_mischer_stop).execute();
             id(ha_mischer_zu).execute();
@@ -1227,33 +1246,69 @@ script:
           // PRIORITÄT 3: Kessel-Schutz
           if (zl < id(kessel_min).state) {
             id(letzte_prioritaet) = 50;
+            id(hzg_anfahr_zyklen) = 0;
             ESP_LOGW("regelung", "P50: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
             id(ha_mischer_stop).execute();
             return;
           }
 
-          // PRIORITÄT 4: Soll-VL unter dem Rücklauf, der Mischer kann ihn nicht erreichen -> ZU.
-          // Freigabe, wenn der Soll-VL 1 K über seinen kleinsten Wert seit dem Zufahren steigt
-          // oder der RL nach dem Zufahren mehr als 3 K unter den Soll-VL abgekühlt ist
-          // (Hysterese 3 K gegen Pendeln; nach dem Öffnen bleibt der RL unter dem VL, also unter dem Soll)
-          if (!id(hzg_vl_unerreichbar) && soll_vl < rl) {
+          // PRIORITÄT 4: Soll-VL deutlich unter dem Rücklauf, der Mischer kann ihn nicht erreichen -> ZU.
+          // Eintritt erst 2 K unter dem RL: bei geringer Last liegt der RL nur ca. 1 K unter dem VL,
+          // kleine Unterschreitungen regelt der Integrator, statt den laufenden Mischer ganz zuzufahren.
+          // Freigabe, wenn der Soll-VL 1 K über seinen kleinsten Wert seit dem Zufahren gestiegen ist und
+          // höchstens 1 K unter dem RL liegt (sonst wäre die Eintrittsbedingung gleich wieder erfüllt),
+          // oder wenn der RL nach dem Zufahren mehr als 3 K unter den Soll-VL abgekühlt ist
+          // (Hysterese gegen Pendeln; nach dem Öffnen bleibt der RL unter dem VL, also unter dem Soll)
+          // Bei der Freigabe springt der Mischer auf die Startposition, statt aus 0 % mit dem Integrator
+          // hochzukriechen (dauerte 15-24 min, Vorlauf so lange 2-4 K unter Soll)
+          bool p65_frei = false;
+          if (!id(hzg_vl_unerreichbar) && soll_vl < rl - 2.0f) {
             id(hzg_vl_unerreichbar) = true;
             id(hzg_vl_unerreichbar_soll) = soll_vl;
+            id(hzg_anfahr_zyklen) = 0;
             ESP_LOGI("regelung", "P65: Soll-VL %.1f unter RL %.1f -> Mischer ZU", soll_vl, rl);
           } else if (id(hzg_vl_unerreichbar)) {
             id(hzg_vl_unerreichbar_soll) = min(id(hzg_vl_unerreichbar_soll), soll_vl);
-            if (soll_vl > id(hzg_vl_unerreichbar_soll) + 1.0f) {
-              id(hzg_vl_unerreichbar) = false;
+            if (soll_vl > id(hzg_vl_unerreichbar_soll) + 1.0f && soll_vl > rl - 1.0f) {
+              p65_frei = true;
               ESP_LOGI("regelung", "P65: Soll-VL auf %.1f gestiegen -> Regelung frei", soll_vl);
             } else if (soll_vl > rl + 3.0f) {
-              id(hzg_vl_unerreichbar) = false;
+              p65_frei = true;
               ESP_LOGI("regelung", "P65: RL %.1f mehr als 3 K unter Soll-VL %.1f -> Regelung frei", rl, soll_vl);
             }
           }
-          if (id(hzg_vl_unerreichbar)) {
+          if (id(hzg_vl_unerreichbar) && !p65_frei) {
             id(letzte_prioritaet) = 65;
             id(pos_ziel) = 0.0f;
             if (pos_ist > 2.0f) id(ha_mischer_zu).execute();
+            return;
+          }
+          id(hzg_vl_unerreichbar) = false;
+
+          // Startsprung nach der P65-Freigabe (aus 0 % hoch) und nach dem Powerbetrieb (von 100 % herunter)
+          if (p65_frei || power_ende) {
+            int start = (int) roundf(id(pos_start).state);
+            if (fabsf(pos_ist - (float) start) > 3.0f) {
+              id(pos_ziel) = (float) start;
+              id(hzg_anfahr_zyklen) = 12;  // höchstens 3 min warten, bis der Rollaktor dort ist
+              id(mischer_fahre_position).execute(start);
+              id(mischer_pos) = (float) start;
+              ESP_LOGI("regelung", "%s -> Mischer auf Startposition %d%% (Ist %.1f%%)",
+                       p65_frei ? "P65-Freigabe" : "Ende Powerbetrieb", start, pos_ist);
+            }
+          }
+          // Mischer fährt noch auf die Startposition: Integrator ruht, bis das Ist auf 3 % heran ist
+          if (id(hzg_anfahr_zyklen) > 0 && fabsf(pos_ist - id(pos_ziel)) > 3.0f) {
+            id(letzte_prioritaet) = 65;
+            return;
+          }
+          id(hzg_anfahr_zyklen) = 0;
+
+          // P55: Kessel kalt (ZL-RL < 5 K), der Mischer hat keine Wirkung -> Position halten.
+          // Sonst läuft der Integrator hoch (bis 99 % beobachtet) und der Vorlauf schwingt beim Kesselstart über
+          if (zl - rl < 5.0f) {
+            id(letzte_prioritaet) = 55;
+            ESP_LOGI("regelung", "P55: ZL-RL %.1f K < 5 K, Mischer ohne Wirkung -> Position halten", zl - rl);
             return;
           }
 
