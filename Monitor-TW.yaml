@@ -1,8 +1,11 @@
 substitutions:
   # Quelle der Raumtemperatur: Template-Helper EGWZ-Temp-Mittel (offsetkorrigiert, Ausfallreserve über egwz_mittel-helper in HA)
   raumtemp_quelle: sensor.egwz_temp_mittel
-  # HZG Untergrenze der Raum-Solltemperatur (Absenkung), Frostschutz
+  # HZG Grenzen der Raum-Solltemperatur (Frostschutz unten), gelten auch für die Werte im Zeitplan
   HZG_FROST_MIN: "12.0"
+  HZG_TEMP_MAX: "23.0"
+  # HZG Zeitplan: höchstens so viele Schaltpunkte in input_text.hzg_zeiten / hzg_temperaturen
+  HZG_PLAN_MAX: "10"
   # Betriebsmodus (Index im Select HZG_Betriebsmodus, Reihenfolge der Optionen nicht ändern)
   BETRIEBSMODUS: "id(hzg_betriebsmodus).active_index().value_or(0)"
   BM_REGEL: "0"
@@ -203,7 +206,43 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
-  - id: hzg_aufheizen
+  # Vorheizen: Index des Schaltpunkts, auf den vorgeheizt wird (-1 = kein Vorheizen)
+  - id: hzg_aufheiz_ziel
+    type: int
+    restore_value: false
+    initial_value: '-1'
+  # HZG Zeitplan aus input_text.hzg_zeiten (Minuten ab Mitternacht, aufsteigend) und input_text.hzg_temperaturen (°C)
+  # Bei ungültigen Listen bleibt die letzte gültige Fassung aktiv
+  - id: hzg_plan_n
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_plan_min
+    type: int[${HZG_PLAN_MAX}]
+    restore_value: false
+    initial_value: '{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}'
+  - id: hzg_plan_temp
+    type: float[${HZG_PLAN_MAX}]
+    restore_value: false
+    initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
+  # Liste neu gelesen: Wunschtemperatur sofort aus dem Plan setzen
+  - id: hzg_plan_neu
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # zuletzt aus dem Plan in HZG_Wunschtemp geschriebener Wert; geschrieben wird nur, wenn sich der Planwert ändert,
+  # eine Handänderung von HZG_Wunschtemp gilt so bis zum nächsten Schaltpunkt
+  - id: hzg_plan_soll_gesetzt
+    type: float
+    restore_value: false
+    initial_value: '-100.0'
+  # Abschnitt des Plans im letzten Zyklus (-1 = unbekannt), für das Nachführen der Aufheizzeit
+  - id: hzg_seg_prev
+    type: int
+    restore_value: false
+    initial_value: '-1'
+  # Partybetrieb im letzten Zyklus aktiv (beim Verlassen Wunschtemperatur wieder aus dem Plan setzen)
+  - id: hzg_party_prev
     type: bool
     restore_value: false
     initial_value: 'false'
@@ -397,27 +436,18 @@ number:
     restore_value: true
   
   # HZG Einstellungen der Raumregelung
+  # Raum-Soll: wird im Regelbetrieb an jedem Schaltpunkt aus dem Zeitplan gesetzt (Handänderung gilt bis zum nächsten Schaltpunkt),
+  # im Partybetrieb nicht, dort wird die Temperatur nur über diesen Wert eingestellt
   - platform: template
     name: "HZG_Wunschtemp"
     id: hzg_wunschtemp
-    min_value: 17.0
-    max_value: 23.0
+    min_value: ${HZG_FROST_MIN}
+    max_value: ${HZG_TEMP_MAX}
     step: 0.5
     initial_value: 21.0
     optimistic: true
     restore_value: true
     unit_of_measurement: "°C"
-
-  - platform: template
-    name: "HZG_Absenkung"
-    id: hzg_absenkung
-    min_value: 0.0
-    max_value: 10.0
-    step: 0.5
-    initial_value: 3.0
-    optimistic: true
-    restore_value: true
-    unit_of_measurement: "K"
 
   - platform: template
     name: "HZG_Power_Dauer"
@@ -442,23 +472,6 @@ number:
     restore_value: true
     unit_of_measurement: "min"
 
-# HZG Heizzeit (täglich, ohne Wochenendprofil)
-datetime:
-  - platform: template
-    name: "HZG_Heizzeit_von"
-    id: hzg_heizzeit_von
-    type: time
-    optimistic: true
-    initial_value: "06:00:00"
-    restore_value: true
-
-  - platform: template
-    name: "HZG_Heizzeit_bis"
-    id: hzg_heizzeit_bis
-    type: time
-    optimistic: true
-    initial_value: "22:00:00"
-    restore_value: true
 esp32_touch:
   setup_mode: false    
   low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
@@ -553,6 +566,22 @@ text_sensor:
             id(hzg_geladen) = true;
             id(hzg_save_ms) = millis();
             ESP_LOGI("hzg", "Lerntabelle aus HA geladen: %s", x.c_str());
+
+  # HZG Zeitplan aus HA: Schaltzeiten "HH:MM;HH:MM;..." und Temperaturen "20;21;18" (gleich viele Einträge)
+  - platform: homeassistant
+    id: hzg_zeiten_ha
+    entity_id: input_text.hzg_zeiten
+    internal: true
+    on_value:
+      then:
+        - script.execute: hzg_plan_lesen
+  - platform: homeassistant
+    id: hzg_temperaturen_ha
+    entity_id: input_text.hzg_temperaturen
+    internal: true
+    on_value:
+      then:
+        - script.execute: hzg_plan_lesen
 
   # HZG Modus als Text
   - platform: template
@@ -901,13 +930,81 @@ script:
           id(zl_prev1) = id(zulauf).state;
 
 
+  # HZG Zeitplan prüfen und übernehmen. Ausgewertet wird erst, wenn beide Listen 2 min unverändert sind
+  # (beim Bearbeiten in HA passen Zeiten und Temperaturen kurz nicht zusammen).
+  # Ungültige Liste: Partybetrieb mit HZG_Wunschtemp 21 °C, zurück in den Regelbetrieb nur von Hand
+  - id: hzg_plan_lesen
+    mode: restart
+    then:
+      - delay: 2min
+      - lambda: |-
+          std::string zs = id(hzg_zeiten_ha).state;
+          std::string ts = id(hzg_temperaturen_ha).state;
+          // HA nicht verbunden oder Helper noch nicht gelesen: nichts tun
+          if (zs == "unknown" || zs == "unavailable" || ts == "unknown" || ts == "unavailable") return;
+          auto teilen = [](const std::string &s) {
+            std::vector<std::string> v;
+            size_t a = 0;
+            while (true) {
+              size_t b = s.find(';', a);
+              std::string t = s.substr(a, b == std::string::npos ? std::string::npos : b - a);
+              size_t l = t.find_first_not_of(" \t"), r = t.find_last_not_of(" \t");
+              v.push_back(l == std::string::npos ? std::string("") : t.substr(l, r - l + 1));
+              if (b == std::string::npos) break;
+              a = b + 1;
+            }
+            return v;
+          };
+          int mins[${HZG_PLAN_MAX}];
+          float temps[${HZG_PLAN_MAX}];
+          int n = 0;
+          // Prüfung, liefert den Fehlertext oder "" bei gültiger Liste
+          auto pruefen = [&]() -> std::string {
+            auto z = teilen(zs);
+            auto t = teilen(ts);
+            n = z.size();
+            if (n != (int) t.size() || n < 1 || n > ${HZG_PLAN_MAX})
+              return str_sprintf("%d Zeiten, %d Temperaturen (1-${HZG_PLAN_MAX}, gleich viele)", n, (int) t.size());
+            for (int k = 0; k < n; k++) {
+              int h, m;
+              char rest;
+              if (sscanf(z[k].c_str(), "%d:%d%c", &h, &m, &rest) != 2 || h < 0 || h > 23 || m < 0 || m > 59)
+                return "Zeit '" + z[k] + "'";
+              mins[k] = h * 60 + m;
+              if (k > 0 && mins[k] <= mins[k - 1])
+                return "Zeiten nicht aufsteigend ('" + z[k] + "')";
+              std::string tt = t[k];
+              for (auto &c : tt) if (c == ',') c = '.';
+              char *ende = nullptr;
+              float v = strtof(tt.c_str(), &ende);
+              if (tt.empty() || ende == nullptr || *ende != '\0' || v < ${HZG_FROST_MIN} || v > ${HZG_TEMP_MAX})
+                return "Temperatur '" + t[k] + "' (${HZG_FROST_MIN}-${HZG_TEMP_MAX} °C)";
+              temps[k] = v;
+            }
+            return "";
+          };
+          std::string fehler = pruefen();
+          if (!fehler.empty()) {
+            ESP_LOGW("hzg", "Zeitplan ungültig: %s -> Partybetrieb mit 21 °C, alter Plan bleibt gespeichert", fehler.c_str());
+            if (${BETRIEBSMODUS} != ${BM_PARTY}) id(hzg_betriebsmodus).make_call().set_index(${BM_PARTY}).perform();
+            id(hzg_wunschtemp).make_call().set_value(21.0f).perform();
+            return;
+          }
+          for (int k = 0; k < n; k++) {
+            id(hzg_plan_min)[k] = mins[k];
+            id(hzg_plan_temp)[k] = temps[k];
+          }
+          id(hzg_plan_n) = n;
+          id(hzg_plan_neu) = true;
+          ESP_LOGI("hzg", "Zeitplan übernommen: %d Schaltpunkte (%s / %s)", n, zs.c_str(), ts.c_str());
+
   # HZG äußerer Kreis (Raumtemperatur -> Korrektur des Soll-Vorlaufs), läuft vor "regelung"
   - id: hzg_aussen
     mode: single
     then:
       - lambda: |-
           // Konstanten
-          const float FROST_MIN = ${HZG_FROST_MIN};  // Untergrenze Raum-Soll in der Absenkung
+          const float FROST_MIN = ${HZG_FROST_MIN};  // Untergrenze Raum-Soll (Frostschutz)
           const float KP_RAUM   = 3.0f;      // K Vorlauf pro K Raumfehler (sofort wirksam, begrenzt auf +-10 K)
           const float ALPHA_F   = 0.02f;     // Filter Raumtemperatur pro 15-s-Zyklus (ca. 12 min Zeitkonstante)
           const float ALPHA_I   = 0.0025f;   // Lernrate der Tabelle pro Zyklus und K Fehler (ca. 0,6 K/h je K)
@@ -957,34 +1054,64 @@ script:
           }
           bool sensor_ok = id(hzg_raum_f_ok) && id(hzg_sensor_ms) != 0 && (uint32_t)(jetzt - id(hzg_sensor_ms)) < 1200000UL;
 
-          // Heizzeit, Minuten bis zum Beginn der Heizzeit
-          bool in_heizzeit = true;
-          int min_bis_von = 0;
+          // Zeitplan: aktueller Abschnitt und nächster Schaltpunkt
+          int n = id(hzg_plan_n);
           auto zeit = id(ha_time).now();
-          if (zeit.is_valid()) {
+          bool plan_ok = n > 0 && zeit.is_valid();
+          bool plan_neu = id(hzg_plan_neu);
+          bool party = (idx == ${BM_PARTY});
+          int seg = -1, nxt = -1, min_bis_nxt = 0;
+          float t_min = 0.0f, t_max = 0.0f;
+          if (plan_ok) {
             int jetzt_min = zeit.hour * 60 + zeit.minute;
-            int von = id(hzg_heizzeit_von).hour * 60 + id(hzg_heizzeit_von).minute;
-            int bis = id(hzg_heizzeit_bis).hour * 60 + id(hzg_heizzeit_bis).minute;
-            if (von == bis)     in_heizzeit = true;
-            else if (von < bis) in_heizzeit = (jetzt_min >= von && jetzt_min < bis);
-            else                in_heizzeit = (jetzt_min >= von || jetzt_min < bis);
-            min_bis_von = (von - jetzt_min + 1440) % 1440;
+            seg = n - 1;  // vor dem ersten Schaltpunkt gilt noch der letzte Eintrag vom Vortag
+            for (int k = 0; k < n; k++) if (id(hzg_plan_min)[k] <= jetzt_min) seg = k;
+            nxt = (seg + 1) % n;
+            min_bis_nxt = (id(hzg_plan_min)[nxt] - jetzt_min + 1440) % 1440;
+            t_min = t_max = id(hzg_plan_temp)[0];
+            for (int k = 1; k < n; k++) {
+              t_min = min(t_min, id(hzg_plan_temp)[k]);
+              t_max = max(t_max, id(hzg_plan_temp)[k]);
+            }
           }
+          // Abschnitt mit der niedrigsten Temperatur der Liste = Absenkung (kein Lernen), nur wenn die Liste verschiedene Werte hat
+          bool tiefster = plan_ok && t_max > t_min + 0.01f && id(hzg_plan_temp)[seg] <= t_min + 0.01f;
 
-          float wunsch = id(hzg_wunschtemp).state;
-          float absenk = id(hzg_absenkung).state;
-
-          // Aufheizen: Beginn so, dass zu "von" die Wunschtemperatur erreicht ist. Einmal gestartet bleibt es bis "von"
-          float diff_auf = sensor_ok ? max(0.0f, wunsch - id(hzg_raum_f)) : 0.0f;
-          float auf_min  = min(240.0f, id(hzg_k_auf) * diff_auf);
+          // Vorheizen vor jedem Anstieg: so früh beginnen, dass zum Schaltpunkt die neue Temperatur erreicht ist.
+          // Einmal gestartet bleibt es bis zum Schaltpunkt (danach zeigt nxt auf den folgenden Punkt)
+          float auf_min = 0.0f;
+          if (id(hzg_aufheiz_ziel) != nxt || plan_neu) id(hzg_aufheiz_ziel) = -1;
+          if (plan_ok && n > 1 && !party) {
+            float t_akt = id(hzg_plan_temp)[seg];
+            float t_neu = id(hzg_plan_temp)[nxt];
+            if (t_neu > t_akt + 0.01f && sensor_ok) {
+              auf_min = min(240.0f, id(hzg_k_auf) * max(0.0f, t_neu - id(hzg_raum_f)));
+              if (id(hzg_aufheiz_ziel) < 0 && auf_min > 0.0f && min_bis_nxt <= (int) auf_min) {
+                id(hzg_aufheiz_ziel) = nxt;
+                ESP_LOGI("hzg", "Vorheizen auf %.1f °C, Schaltpunkt in %d min", t_neu, min_bis_nxt);
+              }
+            }
+          } else {
+            id(hzg_aufheiz_ziel) = -1;
+          }
           id(hzg_aufheiz_min) = auf_min;
-          if (in_heizzeit) {
-            id(hzg_aufheizen) = false;
-          } else if (id(hzg_aufheizen) && min_bis_von > 300) {
-            id(hzg_aufheizen) = false;
-          } else if (!id(hzg_aufheizen) && auf_min > 0.0f && min_bis_von <= (int) auf_min) {
-            id(hzg_aufheizen) = true;
+          bool aufheizen = id(hzg_aufheiz_ziel) >= 0;
+
+          // HZG_Wunschtemp aus dem Plan setzen (nicht im Partybetrieb). Geschrieben wird nur, wenn sich der Planwert ändert
+          // (Schaltpunkt, Vorheizbeginn, neue Liste, Ende Party), eine Handänderung gilt so bis zum nächsten Schaltpunkt
+          if (plan_ok && !party) {
+            float soll_plan = id(hzg_plan_temp)[aufheizen ? nxt : seg];
+            if (plan_neu || id(hzg_party_prev) || fabsf(soll_plan - id(hzg_plan_soll_gesetzt)) > 0.01f) {
+              id(hzg_plan_soll_gesetzt) = soll_plan;
+              if (fabsf(id(hzg_wunschtemp).state - soll_plan) > 0.01f) {
+                ESP_LOGI("hzg", "Zeitplan: HZG_Wunschtemp %.1f -> %.1f °C", id(hzg_wunschtemp).state, soll_plan);
+                id(hzg_wunschtemp).make_call().set_value(soll_plan).perform();
+              }
+            }
           }
+          if (plan_ok) id(hzg_plan_neu) = false;
+          id(hzg_party_prev) = party;
+          float wunsch = id(hzg_wunschtemp).state;
 
           // Interner Zustand
           int modus;
@@ -992,21 +1119,25 @@ script:
           else if (idx == ${BM_MANUELL})             modus = ${ST_MANUELL};
           else if (!id(hzg_regelung_aktiv).state)    modus = ${ST_AUS};
           else if (!sensor_ok || !id(hzg_geladen))   modus = ${ST_FALLBACK};
-          else if (idx == ${BM_PARTY})               modus = ${ST_PARTY};
-          else if (in_heizzeit)                      modus = ${ST_HEIZEN};
-          else if (id(hzg_aufheizen))                modus = ${ST_AUFHEIZEN};
-          else                                       modus = ${ST_ABSENKEN};
+          else if (party)                            modus = ${ST_PARTY};
+          else if (aufheizen)                        modus = ${ST_AUFHEIZEN};
+          else if (tiefster)                         modus = ${ST_ABSENKEN};
+          else                                       modus = ${ST_HEIZEN};
 
-          float soll_raum = wunsch;
-          if (modus == ${ST_ABSENKEN}) soll_raum = max(FROST_MIN, wunsch - absenk);
+          float soll_raum = max(FROST_MIN, wunsch);
 
-          // Aufheizzeit nachführen: Beim Übergang in die Heizzeit zu kalt = früher beginnen, deutlich zu warm = später
-          if (modus == ${ST_HEIZEN} && (id(hzg_modus_prev) == ${ST_ABSENKEN} || id(hzg_modus_prev) == ${ST_AUFHEIZEN})) {
-            float f = soll_raum - id(hzg_raum_f);
+          // Aufheizzeit nachführen: an jedem Anstieg laut Plan zu kalt = früher beginnen, deutlich zu warm = später
+          // (nur aus dem normalen Regelbetrieb heraus und nicht unmittelbar nach dem Einlesen einer neuen Liste)
+          int mp = id(hzg_modus_prev);
+          if (plan_ok && !plan_neu && sensor_ok && id(hzg_seg_prev) >= 0 && seg != id(hzg_seg_prev)
+              && id(hzg_plan_temp)[seg] > id(hzg_plan_temp)[id(hzg_seg_prev)] + 0.01f
+              && (mp == ${ST_HEIZEN} || mp == ${ST_ABSENKEN} || mp == ${ST_AUFHEIZEN})) {
+            float f = id(hzg_plan_temp)[seg] - id(hzg_raum_f);
             if (f > 0.5f)       id(hzg_k_auf) = min(120.0f, id(hzg_k_auf) * 1.15f);
             else if (f < -0.3f) id(hzg_k_auf) = max(10.0f, id(hzg_k_auf) * 0.9f);
-            ESP_LOGI("hzg", "Heizzeit beginnt: Raumfehler=%.2f -> Aufheizzeit %.1f min/K", f, id(hzg_k_auf));
+            ESP_LOGI("hzg", "Schaltpunkt mit Anstieg erreicht: Raumfehler=%.2f -> Aufheizzeit %.1f min/K", f, id(hzg_k_auf));
           }
+          id(hzg_seg_prev) = plan_ok ? seg : -1;
           id(hzg_modus_prev) = modus;
 
           // Korrektur des Soll-Vorlaufs: P-Anteil sofort, I-Anteil in der Tabelle (nur im Heizen/Party gelernt)
@@ -1025,12 +1156,13 @@ script:
             korr = max(-15.0f, min(15.0f, tab + kp));
 
             int pr = id(letzte_prioritaet);
-            // Anti-Windup: nur lernen, wenn VL dem Soll-VL folgt und der Soll-VL physikalisch erreichbar ist (über RL)
+            // Anti-Windup: nur lernen, wenn der VL dem Soll-VL folgt. Ein unerreichbarer Soll-VL (unter dem RL)
+            // führt zu P65 und sperrt das Lernen über die Prioritätsprüfung (nur P0/+-1).
+            // Kein Abstand Soll-VL zu RL fordern: bei geringer Last liegt die Spreizung nur bei ca. 1 K,
+            // die Bedingung "Soll-VL >= RL + 2" hatte das Lernen in fast 90 % der Heizzeit gesperrt
             float vl_i = id(vorlauf).state;
-            float rl_i = id(ruecklauf).state;
             float svl  = id(hzg_soll_vl_eff);
-            bool folgt = !isnan(vl_i) && !isnan(rl_i) && svl > 0.0f
-                         && fabsf(vl_i - svl) < 2.0f && svl >= rl_i + 2.0f;
+            bool folgt = !isnan(vl_i) && svl > 0.0f && fabsf(vl_i - svl) < 2.0f;
             // Fenster: kein Lernen bei offenem Fenster und bis 30 min nach dem Schließen (Lüften ist kein Heizbedarf)
             bool fenster_ruhe = !id(hzg_fenster_gesehen) || (uint32_t)(jetzt - id(hzg_fenster_ms)) > 1800000UL;
             bool power_nachlauf = id(hzg_power_gesehen) && (uint32_t)(jetzt - id(hzg_power_zuletzt)) < 7200000UL;
@@ -1415,7 +1547,7 @@ interval:
             kessel_min: !lambda "return id(kessel_min).state;"
             heizgrenze: !lambda "return id(heizgrenze_at).state;"
             hzg_wunsch: !lambda "return id(hzg_wunschtemp).state;"
-            hzg_absenkung: !lambda "return id(hzg_absenkung).state;"
+            hzg_absenkung: !lambda "return 0.0f;"  # Absenkung entfallen (Zeitplan), Spalte bleibt für das CSV-Format
             hzg_aktiv: !lambda "return id(hzg_regelung_aktiv).state ? 1 : 0;"
 # Das csv-log kann unter codesandbox.io, login holger.g.ullrich@googlemail.com, analysiert werden. saucool.
 # im terminal mit npm run dev
