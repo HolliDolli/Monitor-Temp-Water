@@ -1,3 +1,7 @@
+# Ganz viel von diesem Code wurde mittels Claude.AI realisiert.
+# Ja, ich finde KI unter ordentlicher Aufsicht wirklich nützlich. 
+# Wichtig ist dabei die qualifizierte Aufsicht.
+
 substitutions:
   # Quelle der Raumtemperatur: Template-Helper EGWZ-Temp-Mittel (offsetkorrigiert, Ausfallreserve über egwz_mittel-helper in HA)
   raumtemp_quelle: sensor.egwz_temp_mittel
@@ -12,8 +16,9 @@ substitutions:
   BM_PARTY: "1"
   BM_POWER: "2"
   BM_MANUELL: "3"
+  BM_KENNLINIE: "4"
   # Interner Zustand der Raumregelung (HZG_Modus)
-  ST_AUS: "0"
+  ST_KENNLINIE: "0"
   ST_HEIZEN: "1"
   ST_ABSENKEN: "2"
   ST_AUFHEIZEN: "3"
@@ -500,12 +505,6 @@ switch:
 
   # Der Mischer wird nur über cover.rollaktor1 in HA gefahren, Handbetrieb = Betriebsmodus "Manuell"
 
-  # HZG Raumregelung ein/aus (aus = reine Heizkurve)
-  - platform: template
-    name: "HZG_Regelung_aktiv"
-    id: hzg_regelung_aktiv
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
 select:
 
   # HZG Betriebsmodus
@@ -518,6 +517,7 @@ select:
       - "Partybetrieb"
       - "Powerbetrieb"
       - "Manuell"
+      - "Kennlinie"
     initial_option: "Regelbetrieb"
     restore_value: true
     on_value:
@@ -597,7 +597,7 @@ text_sensor:
         case ${ST_POWER}:     return std::string("Power");
         case ${ST_FALLBACK}:  return std::string("Fallback");
         case ${ST_MANUELL}:   return std::string("Manuell");
-        default:              return std::string("Aus");
+        default:              return std::string("Kennlinie");
       }
 binary_sensor:
   - platform: status
@@ -985,7 +985,10 @@ script:
           };
           std::string fehler = pruefen();
           if (!fehler.empty()) {
-            ESP_LOGW("hzg", "Zeitplan ungültig: %s -> Partybetrieb mit 21 °C, alter Plan bleibt gespeichert", fehler.c_str());
+            ESP_LOGW("hzg", "Zeitplan ungültig: %s (alter Plan bleibt gespeichert)", fehler.c_str());
+            // im Modus Kennlinie wird die Liste nicht benutzt: kein Umschalten (würde die Raumregelung ungefragt einschalten)
+            if (${BETRIEBSMODUS} == ${BM_KENNLINIE}) return;
+            ESP_LOGW("hzg", "-> Partybetrieb mit 21 °C, zurück in den Regelbetrieb nur von Hand");
             if (${BETRIEBSMODUS} != ${BM_PARTY}) id(hzg_betriebsmodus).make_call().set_index(${BM_PARTY}).perform();
             id(hzg_wunschtemp).make_call().set_value(21.0f).perform();
             return;
@@ -1117,7 +1120,7 @@ script:
           int modus;
           if (idx == ${BM_POWER})                    modus = ${ST_POWER};
           else if (idx == ${BM_MANUELL})             modus = ${ST_MANUELL};
-          else if (!id(hzg_regelung_aktiv).state)    modus = ${ST_AUS};
+          else if (idx == ${BM_KENNLINIE})           modus = ${ST_KENNLINIE};  // reine Heizkurve, keine Raumregelung
           else if (!sensor_ok || !id(hzg_geladen))   modus = ${ST_FALLBACK};
           else if (party)                            modus = ${ST_PARTY};
           else if (aufheizen)                        modus = ${ST_AUFHEIZEN};
@@ -1548,6 +1551,6 @@ interval:
             heizgrenze: !lambda "return id(heizgrenze_at).state;"
             hzg_wunsch: !lambda "return id(hzg_wunschtemp).state;"
             hzg_absenkung: !lambda "return 0.0f;"  # Absenkung entfallen (Zeitplan), Spalte bleibt für das CSV-Format
-            hzg_aktiv: !lambda "return id(hzg_regelung_aktiv).state ? 1 : 0;"
+            hzg_aktiv: !lambda "return (${BETRIEBSMODUS} == ${BM_KENNLINIE}) ? 0 : 1;"  # 0 im Modus Kennlinie (früher Schalter HZG_Regelung_aktiv)
 # Das csv-log kann unter codesandbox.io, login holger.g.ullrich@googlemail.com, analysiert werden. saucool.
 # im terminal mit npm run dev
