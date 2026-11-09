@@ -158,7 +158,7 @@ globals:
     type: float[6]
     restore_value: false
     initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
-  # Aufheizzeit in Minuten pro Kelvin Differenz, wird an jedem Heizzeit-Beginn nachgeführt
+  # Aufheizzeit in Minuten pro Kelvin Differenz, wird an jedem Anstieg laut Zeitplan nachgeführt
   - id: hzg_k_auf
     type: float
     restore_value: false
@@ -230,6 +230,11 @@ globals:
     type: float[${HZG_PLAN_MAX}]
     restore_value: false
     initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
+  # zuletzt ausgewertete Texte beider Listen: HA schickt sie bei jeder Neuverbindung erneut, ausgewertet wird nur eine echte Änderung
+  - id: hzg_plan_text
+    type: std::string
+    restore_value: false
+    initial_value: '""'
   # Liste neu gelesen: Wunschtemperatur sofort aus dem Plan setzen
   - id: hzg_plan_neu
     type: bool
@@ -612,16 +617,6 @@ binary_sensor:
     on_press:
       then:
         - component.update: touch_raw_sensor
-  - platform: template
-    name: "Mischer Anschlag ZU"
-    id: anschlag_zu
-    lambda: return id(mischer_pos) <= 0.0f;
-
-  - platform: template
-    name: "Mischer Anschlag AUF"
-    id: anschlag_auf
-    lambda: return id(mischer_pos) >= 100.0f;
-
   # Sensorfehler der Dallas-Fühler, Regelung steht (P97)
   - platform: template
     name: "HZG_Sensorfehler"
@@ -777,16 +772,6 @@ sensor:
       return id(mischer_pos);
 
   - platform: template
-    name: "Mischer Anschlag"
-    id: mischer_anschlag
-    update_interval: never
-    lambda: |-
-      float pos = id(mischer_pos);
-      if (pos <= 0.0f)   return 1.0;  // Anschlag ZU
-      if (pos >= 100.0f) return 2.0;  // Anschlag AUF
-      return 0.0;                     // frei
-
-  - platform: template
     name: "Mischer Letzte Priorität"
     id: mischer_letzte_prioritaet
     update_interval: never
@@ -931,7 +916,7 @@ script:
 
 
   # HZG Zeitplan prüfen und übernehmen. Ausgewertet wird erst, wenn beide Listen 2 min unverändert sind
-  # (beim Bearbeiten in HA passen Zeiten und Temperaturen kurz nicht zusammen).
+  # (beim Bearbeiten in HA passen Zeiten und Temperaturen kurz nicht zusammen), und nur, wenn sich ein Text geändert hat.
   # Ungültige Liste: Partybetrieb mit HZG_Wunschtemp 21 °C, zurück in den Regelbetrieb nur von Hand
   - id: hzg_plan_lesen
     mode: restart
@@ -942,6 +927,11 @@ script:
           std::string ts = id(hzg_temperaturen_ha).state;
           // HA nicht verbunden oder Helper noch nicht gelesen: nichts tun
           if (zs == "unknown" || zs == "unavailable" || ts == "unknown" || ts == "unavailable") return;
+          // unverändert (z. B. nach HA-Neustart erneut gesendet): nichts tun, sonst gingen Handänderung und Vorheizen verloren
+          // bzw. eine ungültige Liste schaltete bei jeder Neuverbindung wieder auf Party mit 21 °C
+          std::string text = zs + "|" + ts;
+          if (text == id(hzg_plan_text)) return;
+          id(hzg_plan_text) = text;
           auto teilen = [](const std::string &s) {
             std::vector<std::string> v;
             size_t a = 0;
@@ -1053,9 +1043,8 @@ script:
               id(hzg_raum_f) += ALPHA_F * (ist_roh - id(hzg_raum_f));
             }
             id(hzg_sensor_ms) = jetzt;
-            if (id(hzg_sensor_ms) == 0) id(hzg_sensor_ms) = 1;
           }
-          bool sensor_ok = id(hzg_raum_f_ok) && id(hzg_sensor_ms) != 0 && (uint32_t)(jetzt - id(hzg_sensor_ms)) < 1200000UL;
+          bool sensor_ok = id(hzg_raum_f_ok) && (uint32_t)(jetzt - id(hzg_sensor_ms)) < 1200000UL;
 
           // Zeitplan: aktueller Abschnitt und nächster Schaltpunkt
           int n = id(hzg_plan_n);
@@ -1210,6 +1199,8 @@ script:
     mode: single
     then:
       - lambda: |-
+          // Priorität des letzten Zyklus: Stopp-/Zu-Befehle nur beim Eintritt in eine Priorität senden, nicht alle 15 s
+          int prio_alt = id(letzte_prioritaet);
           // Sicherheitschecks
           id(letzte_prioritaet) = 100;
           if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der Boot abgeschlossen ist
@@ -1226,14 +1217,15 @@ script:
 
           id(letzte_prioritaet) = 99;
           // Modus Manuell, Mischer wird von Hand über cover.rollaktor1 gefahren.
-          // Vorlauf-Max (P60) bleibt aktiv: solange VL >= Max, in jedem Zyklus ZU (wie im Regelbetrieb)
+          // Vorlauf-Max (P60) bleibt aktiv: solange VL >= Max, ZU (wie im Regelbetrieb)
           if (${BETRIEBSMODUS} == ${BM_MANUELL}) {
             float vlm = id(vorlauf).state;
             if (!isnan(vlm) && vlm >= id(vorlauf_max).state) {
               id(letzte_prioritaet) = 60;
-              ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> ZU", vlm);
-              id(ha_mischer_stop).execute();
-              id(ha_mischer_zu).execute();
+              if (prio_alt != 60 || id(mischer_pos) > 2.0f) {
+                ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> ZU", vlm);
+                id(ha_mischer_zu).execute();
+              }
             }
             return;
           }
@@ -1249,8 +1241,6 @@ script:
           id(letzte_prioritaet) = 92;
           if (isnan(id(soll_vorlauf).state)) return;
           id(letzte_prioritaet) = 91;
-
-          ESP_LOGI("regelung", "Sicherheitschecks beendet");
 
           float vl  = id(vorlauf).state;
           float rl  = id(ruecklauf).state;
@@ -1289,7 +1279,16 @@ script:
           ESP_LOGD("regelung", "VL=%.1f Trend=%.2f -> VL-Prognose=%.1f; Soll=%.1f -> Fehler=%.2f; Pos-Ist=%.1f%% Pos-Ziel=%.1f%%",
                    vl, trend, vl_pred, soll_vl, fehler, pos_ist, id(pos_ziel));
 
-          ESP_LOGI("regelung", "Berechnungen abgeschlossen");
+          // Mischer auf die Startposition (P80 Vorstellen, Startsprung nach P65-Freigabe und nach Powerbetrieb).
+          // Fährt nur bei mehr als 3 % Abweichung, liefert true, wenn ein Fahrbefehl gesendet wurde
+          auto fahre_start = [&]() -> bool {
+            int start = (int) roundf(id(pos_start).state);
+            id(pos_ziel) = (float) start;
+            if (fabsf(pos_ist - (float) start) <= 3.0f) return false;
+            id(mischer_fahre_position).execute(start);
+            id(mischer_pos) = (float) start;
+            return true;
+          };
 
           // -------------------------------------------------------
           // BLOCK 2: Prioritäten und Aktionen
@@ -1304,7 +1303,6 @@ script:
               id(hzg_power_vlmax) = true;
               ESP_LOGW("regelung", "P60 (Power): Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
               id(hzg_power_gesendet) = false;
-              id(ha_mischer_stop).execute();
               id(ha_mischer_zu).execute();
             }
             if (id(hzg_power_vlmax)) {
@@ -1317,9 +1315,11 @@ script:
             }
             if (zl < id(kessel_min).state) {
               id(letzte_prioritaet) = 50;
-              ESP_LOGW("regelung", "P50 (Power): Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
               id(hzg_power_gesendet) = false;
-              id(ha_mischer_stop).execute();
+              if (prio_alt != 50) {
+                ESP_LOGW("regelung", "P50 (Power): Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
+                id(ha_mischer_stop).execute();
+              }
               return;
             }
             id(letzte_prioritaet) = 85;
@@ -1341,9 +1341,10 @@ script:
           if (at >= id(heizgrenze_at).state) {
             id(letzte_prioritaet) = 70;
             id(hzg_anfahr_zyklen) = 0;
-            ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
-            id(ha_mischer_stop).execute();
-            id(ha_mischer_zu).execute();
+            if (prio_alt != 70 || pos_ist > 2.0f) {
+              ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
+              id(ha_mischer_zu).execute();
+            }
             return;
           }
 
@@ -1351,18 +1352,13 @@ script:
           if (!id(ventil_offen).state) {
             id(letzte_prioritaet) = 80;
             id(hzg_anfahr_zyklen) = 0;
-            ESP_LOGI("regelung", "P80 Alle Ventile zu -> Regelung pausiert");
             // bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt,
             // nicht bei aktivem P65 (der Mischer würde nach dem Öffnen der Ventile sofort wieder zugefahren)
-            // Sonst Mischer anhalten, Position halten
+            // Sonst Mischer beim Eintritt anhalten, Position halten
             if (zl - soll_vl > 15.0f && !id(hzg_vl_unerreichbar)) {
-              int start = (int) roundf(id(pos_start).state);
-              id(pos_ziel) = (float) start;
-              if (fabsf(pos_ist - (float) start) > 2.0f) {
-                id(mischer_fahre_position).execute(start);
-                id(mischer_pos) = (float) start;
-              }
-            } else {
+              if (fahre_start()) ESP_LOGI("regelung", "P80: Alle Ventile zu, heißer Zulauf -> Mischer auf Startposition");
+            } else if (prio_alt != 80) {
+              ESP_LOGI("regelung", "P80: Alle Ventile zu -> Regelung pausiert");
               id(ha_mischer_stop).execute();
             }
             return;
@@ -1372,9 +1368,10 @@ script:
           if (vl >= id(vorlauf_max).state) {
             id(letzte_prioritaet) = 60;
             id(hzg_anfahr_zyklen) = 0;
-            ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
-            id(ha_mischer_stop).execute();
-            id(ha_mischer_zu).execute();
+            if (prio_alt != 60 || pos_ist > 2.0f) {
+              ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
+              id(ha_mischer_zu).execute();
+            }
             return;
           }
 
@@ -1382,8 +1379,10 @@ script:
           if (zl < id(kessel_min).state) {
             id(letzte_prioritaet) = 50;
             id(hzg_anfahr_zyklen) = 0;
-            ESP_LOGW("regelung", "P50: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
-            id(ha_mischer_stop).execute();
+            if (prio_alt != 50) {
+              ESP_LOGW("regelung", "P50: Kessel kann nicht liefern (ZL=%.1f) -> nicht öffnen", zl);
+              id(ha_mischer_stop).execute();
+            }
             return;
           }
 
@@ -1396,8 +1395,9 @@ script:
           // (Hysterese gegen Pendeln; nach dem Öffnen bleibt der RL unter dem VL, also unter dem Soll)
           // Bei der Freigabe springt der Mischer auf die Startposition, statt aus 0 % mit dem Integrator
           // hochzukriechen (dauerte 15-24 min, Vorlauf so lange 2-4 K unter Soll)
-          bool p65_frei = false;
+          bool p65_frei = false, p65_eintritt = false;
           if (!id(hzg_vl_unerreichbar) && soll_vl < rl - 2.0f) {
+            p65_eintritt = true;
             id(hzg_vl_unerreichbar) = true;
             id(hzg_vl_unerreichbar_soll) = soll_vl;
             id(hzg_anfahr_zyklen) = 0;
@@ -1415,22 +1415,17 @@ script:
           if (id(hzg_vl_unerreichbar) && !p65_frei) {
             id(letzte_prioritaet) = 65;
             id(pos_ziel) = 0.0f;
-            if (pos_ist > 2.0f) id(ha_mischer_zu).execute();
+            // ZU beim Eintritt und solange das Ist noch nicht zu meldet
+            if (p65_eintritt || pos_ist > 2.0f) id(ha_mischer_zu).execute();
             return;
           }
           id(hzg_vl_unerreichbar) = false;
 
           // Startsprung nach der P65-Freigabe (aus 0 % hoch) und nach dem Powerbetrieb (von 100 % herunter)
-          if (p65_frei || power_ende) {
-            int start = (int) roundf(id(pos_start).state);
-            if (fabsf(pos_ist - (float) start) > 3.0f) {
-              id(pos_ziel) = (float) start;
-              id(hzg_anfahr_zyklen) = 12;  // höchstens 3 min warten, bis der Rollaktor dort ist
-              id(mischer_fahre_position).execute(start);
-              id(mischer_pos) = (float) start;
-              ESP_LOGI("regelung", "%s -> Mischer auf Startposition %d%% (Ist %.1f%%)",
-                       p65_frei ? "P65-Freigabe" : "Ende Powerbetrieb", start, pos_ist);
-            }
+          if ((p65_frei || power_ende) && fahre_start()) {
+            id(hzg_anfahr_zyklen) = 12;  // höchstens 3 min warten, bis der Rollaktor dort ist
+            ESP_LOGI("regelung", "%s -> Mischer auf Startposition %.0f%% (Ist %.1f%%)",
+                     p65_frei ? "P65-Freigabe" : "Ende Powerbetrieb", id(pos_ziel), pos_ist);
           }
           // Mischer fährt noch auf die Startposition: Integrator ruht, bis das Ist auf 3 % heran ist
           if (id(hzg_anfahr_zyklen) > 0 && fabsf(pos_ist - id(pos_ziel)) > 3.0f) {
@@ -1477,32 +1472,26 @@ script:
 interval:
   - interval: 15s
     then:
-      - logger.log: 'Dallas'
       - component.update: raumtemp
       - component.update: zulauf
       - component.update: ruecklauf
       - component.update: vorlauf
       - delay: ${DALLAS_WARTEZEIT}  # warten bis Dallas-Konversion fertig
       - component.update: vl_rl_diff
-      - logger.log: 'Puffer'
       - script.execute: puffer_schreiben
       - script.wait: puffer_schreiben
-      - logger.log: 'Trend'
       - component.update: zl_trend_sensor
       - component.update: vl_trend      
       - component.update: soll_vorlauf      
       # HZG äußerer Kreis vor der Regelung ausführen
       - script.execute: hzg_aussen
       - script.wait: hzg_aussen
-      - logger.log: 'Regelung'
       - script.execute: regelung
       - script.wait: regelung
-      - logger.log: 'Result'
       - component.update: mischer_letzte_prioritaet      
       - component.update: pid_ausgang_sensor
       - component.update: sollvorlauf_korrigiert
       - component.update: mischer_position
-      - component.update: mischer_anschlag
       # HZG Sensoren aktualisieren
       - component.update: hzg_soll_raum_s
       - component.update: hzg_raumfehler_s
