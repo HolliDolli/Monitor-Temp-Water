@@ -86,6 +86,13 @@ wifi:
   # Enable fallback hotspot (captive portal) in case wifi connection fails
 captive_portal:
 
+web_server:
+  port: 80
+  version: 3
+  local: true              # JS/CSS in die Firmware statt vom CDN laden
+  auth:                    # optional, empfehlenswert
+    username: admin
+    password: !secret web_password
 
 ota:
   - platform: esphome
