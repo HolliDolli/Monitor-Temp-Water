@@ -330,6 +330,11 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+  # Absenken: Raum liegt noch über dem Absenk-Soll -> nicht heizen (Soll-VL auf die Untergrenze, P65 fährt den Mischer zu)
+  - id: hzg_absenk_zu
+    type: bool
+    restore_value: false
+    initial_value: 'false'
 number:
 
   - platform: template
@@ -1173,6 +1178,19 @@ script:
               id(hzg_tab)[i0 + 1] = max(-15.0f, min(15.0f, id(hzg_tab)[i0 + 1] + w1 * d));
             }
           }
+          // Absenken: solange der Raum mehr als ABSENK_EIN über dem Absenk-Soll liegt, wird nicht geheizt.
+          // Der P-Anteil allein (3 K Vorlauf pro K) hielt den Raum sonst 2 K über dem Absenk-Soll, gelernt wird im Absenken nicht.
+          // Freigabe bei ABSENK_AUS über dem Soll, ab da regelt die normale Korrektur; außerhalb des Absenkens immer frei
+          const float ABSENK_EIN = 0.5f;
+          const float ABSENK_AUS = 0.2f;
+          bool absenk_zu = id(hzg_absenk_zu);
+          if (modus != ${ST_ABSENKEN})         absenk_zu = false;
+          else if (fehler < -ABSENK_EIN)       absenk_zu = true;
+          else if (fehler > -ABSENK_AUS)       absenk_zu = false;
+          if (absenk_zu != id(hzg_absenk_zu)) {
+            ESP_LOGI("hzg", "Absenken: Raum %.2f K über Soll -> %s", -fehler, absenk_zu ? "nicht heizen (Mischer zu)" : "Regelung frei");
+            id(hzg_absenk_zu) = absenk_zu;
+          }
           id(hzg_lernen) = lern;
           id(hzg_korr) = korr;
           id(hzg_fehler) = fehler;
@@ -1264,6 +1282,9 @@ script:
           float soll_vl = id(soll_vorlauf).state;
           // HZG Korrektur aus dem äußeren Kreis aufschlagen (ohne Raumregelung ist hzg_korr = 0), immer auf 20 °C .. VL-Max - 2 K begrenzen
           soll_vl = max(20.0f, min(id(vorlauf_max).state - 2.0f, soll_vl + id(hzg_korr)));
+          // HZG Absenken mit Raum über dem Absenk-Soll: Soll-VL auf die Untergrenze. Liegt er damit 2 K unter dem RL,
+          // fährt P65 den Mischer zu und gibt ihn nach dem Ende wieder frei (Startsprung auf die Startposition)
+          if (id(hzg_absenk_zu)) soll_vl = 20.0f;
           id(hzg_soll_vl_eff) = soll_vl;
           ESP_LOGD("regelung", "AT=%.1f -> Soll-VL Heizkurve=%.1f, Soll-VL=%.1f; Spreizung=%.1f; Ist-VL=%.1f",
                    at, id(soll_vorlauf).state, soll_vl, diff, vl);
