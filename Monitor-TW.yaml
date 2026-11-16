@@ -31,6 +31,14 @@ substitutions:
   DALLAS_WARTEZEIT: "850ms"
   # Ringpuffer Vorlauf: 12 Werte à 15 s = 3 min
   VL_PUFFER: "12"
+  # Mischer-Aktor: Entität in HA, muss ein Cover mit Position sein (set_cover_position, close_cover, stop_cover, Attribut current_position).
+  # Beim Tausch des Aktors nur hier ändern (HA-Automationen und Dashboards, die den Aktor direkt ansprechen, getrennt nachziehen)
+  mischer_entity: cover.rollaktor1
+  # Heizgrenze: Hysterese in K, Freigabe erst so weit unter der Heizgrenze (gegen Pendeln der geglätteten Außentemperatur um die Grenze)
+  HEIZGRENZE_HYST: "1.0"
+  # Totband der Mischerregelung in K: innerhalb von +- diesem Fehler wird der Mischer nicht verstellt.
+  # 1.5 statt 1.0 schont das mechanische Relais des Aktors (bei 1.0 ca. 260 Stellbefehle pro Tag, die Hälfte davon mit Fehler < 1.5 K)
+  VL_TOTBAND: "1.5"
 
 esp32:
   board: lolin32_lite
@@ -119,7 +127,7 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
-  # Mischerposition in %, Quelle ist das Ist des Rollaktors
+  # Mischerposition in %, Quelle ist das Ist des Aktors (mischer_entity)
   - id: mischer_pos
     type: float
     restore_value: false
@@ -325,6 +333,11 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
+  # P70 Heizgrenze aktiv (mit Hysterese HEIZGRENZE_HYST): beim Verlassen Mischer auf die Startposition statt aus 0 % hochzuintegrieren
+  - id: hzg_heizgrenze_aktiv
+    type: bool
+    restore_value: false
+    initial_value: 'false'
   # Powerbetrieb war im letzten Zyklus aktiv: beim Verlassen Mischer auf die Startposition statt von 100 % herunterzuintegrieren
   - id: hzg_power_war_aktiv
     type: bool
@@ -520,7 +533,7 @@ switch:
   - platform: restart
     name: "Monitor-TW Restart"
 
-  # Der Mischer wird nur über cover.rollaktor1 in HA gefahren, Handbetrieb = Betriebsmodus "Manuell"
+  # Der Mischer wird nur über den Aktor in HA gefahren (mischer_entity, siehe substitutions), Handbetrieb = Betriebsmodus "Manuell"
 
 select:
 
@@ -544,7 +557,7 @@ select:
             // Modus Manuell: Startzeitpunkt für das Zeitlimit, die Regelung selbst fängt den Modus ab
             if (i == ${BM_MANUELL}) {
               id(hzg_manuell_start) = millis();
-              ESP_LOGI("hzg", "Manuell aktiviert, Mischer von Hand über cover.rollaktor1");
+              ESP_LOGI("hzg", "Manuell aktiviert, Mischer von Hand über ${mischer_entity}");
             }
 text_sensor:
   - platform: version
@@ -727,9 +740,9 @@ sensor:
     internal: false
 
   - platform: homeassistant   
-    name: "Rollaktor1 Position (Ist)"
-    id: rollaktor1_position_ist
-    entity_id: cover.rollaktor1
+    name: "Mischer-Aktor Position (Ist)"
+    id: mischer_aktor_position_ist
+    entity_id: ${mischer_entity}
     attribute: current_position
     state_class: measurement
 
@@ -888,7 +901,7 @@ script:
       - homeassistant.action:
           action: cover.close_cover
           data:
-            entity_id: cover.rollaktor1
+            entity_id: ${mischer_entity}
 
   - id: ha_mischer_stop
     mode: single
@@ -896,7 +909,7 @@ script:
       - homeassistant.action:
           action: cover.stop_cover
           data:
-            entity_id: cover.rollaktor1
+            entity_id: ${mischer_entity}
 
   - id: mischer_fahre_position
     mode: restart
@@ -906,7 +919,7 @@ script:
       - homeassistant.action:
           action: cover.set_cover_position
           data:
-            entity_id: cover.rollaktor1
+            entity_id: ${mischer_entity}
           variables:
             ziel_var: !lambda 'return zielposition;'
           data_template:
@@ -1230,9 +1243,9 @@ script:
           id(letzte_prioritaet) = 100;
           if (!id(boot_fertig)) return;  // erst mit Regeln beginnen, wenn der Boot abgeschlossen ist
 
-          // Mischerposition in % direkt aus dem Rollaktor-Ist, auch im Modus Manuell
-          if (!isnan(id(rollaktor1_position_ist).state)) {
-            id(mischer_pos) = id(rollaktor1_position_ist).state;
+          // Mischerposition in % direkt aus dem Aktor-Ist, auch im Modus Manuell
+          if (!isnan(id(mischer_aktor_position_ist).state)) {
+            id(mischer_pos) = id(mischer_aktor_position_ist).state;
           }
 
           // Sensorfehler = Fühleranzahl beim Start falsch oder einer der vier Dallas-Fühler liefert NaN
@@ -1241,7 +1254,7 @@ script:
                              || isnan(id(zulauf).state)  || isnan(id(raumtemp).state);
 
           id(letzte_prioritaet) = 99;
-          // Modus Manuell, Mischer wird von Hand über cover.rollaktor1 gefahren.
+          // Modus Manuell, Mischer wird von Hand über den Aktor in HA gefahren.
           // Vorlauf-Max (P60) bleibt aktiv: solange VL >= Max, ZU (wie im Regelbetrieb)
           if (${BETRIEBSMODUS} == ${BM_MANUELL}) {
             float vlm = id(vorlauf).state;
@@ -1290,7 +1303,7 @@ script:
                    at, id(soll_vorlauf).state, soll_vl, diff, vl);
 
           // Integrator mit Prädiktion
-          // Position des Mischers in % (aus dem Rollaktor-Ist, siehe oben)
+          // Position des Mischers in % (aus dem Aktor-Ist, siehe oben)
           float pos_ist = id(mischer_pos);
           // Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen,
           // nicht während der Mischer nach der P65-Freigabe auf die Startposition fährt
@@ -1366,7 +1379,16 @@ script:
           id(hzg_power_war_aktiv) = false;
 
           // PRIORITÄT 1: Heizgrenze (vor P80, sonst stellt P80 den Mischer vor und P70 fährt ihn gleich wieder zu)
+          // Eintritt bei AT >= Heizgrenze, Freigabe erst HEIZGRENZE_HYST darunter; nach der Freigabe springt der Mischer unten auf die Startposition
+          bool heizgrenze_ende = false;
           if (at >= id(heizgrenze_at).state) {
+            id(hzg_heizgrenze_aktiv) = true;
+          } else if (id(hzg_heizgrenze_aktiv) && at < id(heizgrenze_at).state - ${HEIZGRENZE_HYST}) {
+            id(hzg_heizgrenze_aktiv) = false;
+            heizgrenze_ende = true;
+            ESP_LOGI("regelung", "P70: AT=%.1f unter Heizgrenze - ${HEIZGRENZE_HYST} K -> Regelung frei", at);
+          }
+          if (id(hzg_heizgrenze_aktiv)) {
             id(letzte_prioritaet) = 70;
             id(hzg_anfahr_zyklen) = 0;
             if (prio_alt != 70 || pos_ist > 2.0f) {
@@ -1449,11 +1471,11 @@ script:
           }
           id(hzg_vl_unerreichbar) = false;
 
-          // Startsprung nach der P65-Freigabe (aus 0 % hoch) und nach dem Powerbetrieb (von 100 % herunter)
-          if ((p65_frei || power_ende) && fahre_start()) {
-            id(hzg_anfahr_zyklen) = 12;  // höchstens 3 min warten, bis der Rollaktor dort ist
+          // Startsprung nach der P65-Freigabe und nach dem Ende der Heizgrenze (aus 0 % hoch) sowie nach dem Powerbetrieb (von 100 % herunter)
+          if ((p65_frei || power_ende || heizgrenze_ende) && fahre_start()) {
+            id(hzg_anfahr_zyklen) = 12;  // höchstens 3 min warten, bis der Aktor dort ist
             ESP_LOGI("regelung", "%s -> Mischer auf Startposition %.0f%% (Ist %.1f%%)",
-                     p65_frei ? "P65-Freigabe" : "Ende Powerbetrieb", id(pos_ziel), pos_ist);
+                     p65_frei ? "P65-Freigabe" : (power_ende ? "Ende Powerbetrieb" : "Ende Heizgrenze"), id(pos_ziel), pos_ist);
           }
           // Mischer fährt noch auf die Startposition: Integrator ruht, bis das Ist auf 3 % heran ist
           if (id(hzg_anfahr_zyklen) > 0 && fabsf(pos_ist - id(pos_ziel)) > 3.0f) {
@@ -1470,8 +1492,8 @@ script:
             return;
           }
 
-          // Totband auf dem Fehler (+-1 K), Zielposition als Float, Untergrenze im Regelbetrieb
-          const float totband = 1.0f;
+          // Totband auf dem Fehler (VL_TOTBAND, siehe substitutions), Zielposition als Float, Untergrenze im Regelbetrieb
+          const float totband = ${VL_TOTBAND};
           if (fabsf(fehler) < totband) {
             id(letzte_prioritaet) = 0;
             ESP_LOGI("regelung", "P0: Fehler im Totband (%.2f K) -> nichts tun", fehler);
@@ -1541,7 +1563,7 @@ interval:
             zl_trend: !lambda "return (id(zl_prev2) > 0.0f) ? (id(zulauf).state - id(zl_prev2)) * 2.0f : 0.0f;"
             aussentemp: !lambda "return id(aussentemp).state;"
             # zusätzliche Logwerte (in der CSV-Automation hinten anhängen)
-            pos_ist: !lambda "return isnan(id(rollaktor1_position_ist).state) ? -1.0f : id(rollaktor1_position_ist).state;"
+            pos_ist: !lambda "return isnan(id(mischer_aktor_position_ist).state) ? -1.0f : id(mischer_aktor_position_ist).state;"
             vl_trend: !lambda "return isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;"
             # Raumtemperatur Wohnzimmer
             egwz_raumtemp: !lambda "return id(egwz_raumtemp).state;"
