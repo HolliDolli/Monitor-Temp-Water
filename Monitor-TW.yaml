@@ -231,6 +231,27 @@ globals:
     type: int
     restore_value: false
     initial_value: '-1'
+  # Messung der Heizrate beim Vorheizen: Start (Zeit, gefilterte Raumtemperatur) und erstes Erreichen der Zieltemperatur
+  - id: hzg_auf_start_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_auf_start_t
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: hzg_auf_erreicht
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_auf_erreicht_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: hzg_auf_erreicht_t
+    type: float
+    restore_value: false
+    initial_value: '0.0'
   # HZG Zeitplan aus input_text.hzg_zeiten (Minuten ab Mitternacht, aufsteigend) und input_text.hzg_temperaturen (°C)
   # Bei ungültigen Listen bleibt die letzte gültige Fassung aktiv
   - id: hzg_plan_n
@@ -1105,7 +1126,16 @@ script:
               auf_min = min(240.0f, id(hzg_k_auf) * max(0.0f, t_neu - id(hzg_raum_f)));
               if (id(hzg_aufheiz_ziel) < 0 && auf_min > 0.0f && min_bis_nxt <= (int) auf_min) {
                 id(hzg_aufheiz_ziel) = nxt;
+                id(hzg_auf_start_ms) = jetzt;
+                id(hzg_auf_start_t) = id(hzg_raum_f);
+                id(hzg_auf_erreicht) = false;
                 ESP_LOGI("hzg", "Vorheizen auf %.1f °C, Schaltpunkt in %d min", t_neu, min_bis_nxt);
+              }
+              // erstes Erreichen der Zieltemperatur merken: danach hält die Regelung, die Heizrate wäre verfälscht
+              if (id(hzg_aufheiz_ziel) == nxt && !id(hzg_auf_erreicht) && id(hzg_raum_f) >= t_neu - 0.05f) {
+                id(hzg_auf_erreicht) = true;
+                id(hzg_auf_erreicht_ms) = jetzt;
+                id(hzg_auf_erreicht_t) = id(hzg_raum_f);
               }
             }
           } else {
@@ -1143,16 +1173,26 @@ script:
 
           float soll_raum = max(FROST_MIN, wunsch);
 
-          // Aufheizzeit nachführen: an jedem Anstieg laut Plan zu kalt = früher beginnen, deutlich zu warm = später
-          // (nur aus dem normalen Regelbetrieb heraus und nicht unmittelbar nach dem Einlesen einer neuen Liste)
+          // Aufheizzeit nachführen: am Schaltpunkt mit Anstieg die beim Vorheizen gemessene Heizrate (min/K) einlernen.
+          // Nur wenn tatsächlich vorgeheizt wurde (ohne Vorheizen sagt der Raumfehler nichts über die Heizrate)
+          // und nicht unmittelbar nach dem Einlesen einer neuen Liste. Gemessen wird bis zum ersten Erreichen der
+          // Zieltemperatur, sonst bis zum Schaltpunkt; gelernt wird erst ab 0,5 K Anstieg (sonst zu verrauscht).
           int mp = id(hzg_modus_prev);
           if (plan_ok && !plan_neu && sensor_ok && id(hzg_seg_prev) >= 0 && seg != id(hzg_seg_prev)
               && id(hzg_plan_temp)[seg] > id(hzg_plan_temp)[id(hzg_seg_prev)] + 0.01f
-              && (mp == ${ST_HEIZEN} || mp == ${ST_ABSENKEN} || mp == ${ST_AUFHEIZEN})) {
-            float f = id(hzg_plan_temp)[seg] - id(hzg_raum_f);
-            if (f > 0.5f)       id(hzg_k_auf) = min(120.0f, id(hzg_k_auf) * 1.15f);
-            else if (f < -0.3f) id(hzg_k_auf) = max(10.0f, id(hzg_k_auf) * 0.9f);
-            ESP_LOGI("hzg", "Schaltpunkt mit Anstieg erreicht: Raumfehler=%.2f -> Aufheizzeit %.1f min/K", f, id(hzg_k_auf));
+              && mp == ${ST_AUFHEIZEN}) {
+            uint32_t ende_ms = id(hzg_auf_erreicht) ? id(hzg_auf_erreicht_ms) : jetzt;
+            float ende_t = id(hzg_auf_erreicht) ? id(hzg_auf_erreicht_t) : id(hzg_raum_f);
+            float dauer = (uint32_t)(ende_ms - id(hzg_auf_start_ms)) / 60000.0f;
+            float dt = ende_t - id(hzg_auf_start_t);
+            if (dt >= 0.5f) {
+              float k_mess = dauer / dt;
+              id(hzg_k_auf) = max(10.0f, min(120.0f, id(hzg_k_auf) + 0.3f * (k_mess - id(hzg_k_auf))));
+              ESP_LOGI("hzg", "Schaltpunkt mit Anstieg: %.2f K in %.0f min = %.1f min/K -> Aufheizzeit %.1f min/K",
+                       dt, dauer, k_mess, id(hzg_k_auf));
+            } else {
+              ESP_LOGI("hzg", "Schaltpunkt mit Anstieg: nur %.2f K in %.0f min, kein Lernen", dt, dauer);
+            }
           }
           id(hzg_seg_prev) = plan_ok ? seg : -1;
           id(hzg_modus_prev) = modus;
