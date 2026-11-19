@@ -40,9 +40,12 @@ substitutions:
   mischer_entity: cover.rollaktor1
   # Heizgrenze: Hysterese in K, Freigabe erst so weit unter der Heizgrenze (gegen Pendeln der geglätteten Außentemperatur um die Grenze)
   HEIZGRENZE_HYST: "1.0"
-  # Totband der Mischerregelung in K: innerhalb von +- diesem Fehler wird der Mischer nicht verstellt.
-  # 1.5 statt 1.0 schont das mechanische Relais des Aktors (bei 1.0 ca. 260 Stellbefehle pro Tag, die Hälfte davon mit Fehler < 1.5 K)
-  VL_TOTBAND: "1.5"
+  # Totband der Mischerregelung in K: innerhalb von +- diesem Fehler wird der Mischer nicht verstellt
+  VL_TOTBAND: "1.0"
+  # Mindestschrittweite des Mischers in %: ein Fahrbefehl wird erst gesendet, wenn die Zielposition so weit vom letzten Befehl abweicht
+  # (Anschläge 0/100 % und die Untergrenze werden immer angefahren). Schont das mechanische Relais des Aktors: die Zahl der Schaltspiele
+  # hängt am Mischerweg (Zulauf fällt zwischen den Brennerstarts um 10-15 K), nicht am Totband (1.5 K brachte keine Ersparnis)
+  MISCHER_MINSCHRITT: "2"
 
 esp32:
   board: lolin32_lite
@@ -178,6 +181,11 @@ globals:
     type: float
     restore_value: false
     initial_value: '60.0'
+  # Zuletzt gesendete Mischerposition in % (Bezug der Mindestschrittweite), -1 = unbekannt
+  - id: pos_gesendet
+    type: int
+    restore_value: false
+    initial_value: '-1'
   # HZG Zustand der Raumregelung
   # Gelernte Korrektur des Soll-Vorlaufs (K) an den Stützstellen AT = -10, -5, 0, 5, 10, 15 °C, dazwischen wird linear interpoliert
   # Kein restore_value (Flash-Schonung): Die Tabelle wird in HA im input_text.hzg_lerntabelle gesichert und beim Start von dort gelesen
@@ -1443,6 +1451,10 @@ script:
           if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
             id(pos_ziel) = pos_ist;
           }
+          // Ebenso den letzten Befehl, wenn der Mischer von außen bewegt wurde (Manuell, Taster, ZU-Befehle)
+          if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - (float) id(pos_gesendet)) > 5.0f) {
+            id(pos_gesendet) = (int) roundf(pos_ist);
+          }
           // Vorlauftrend (K pro ca. 3 min) fortschreiben, damit die Totzeit der Strecke berücksichtigt wird
           float trend   = isnan(id(vl_trend).state) ? 0.0f : id(vl_trend).state;
           float vl_pred = vl + trend * id(vl_horizont).state;
@@ -1460,6 +1472,7 @@ script:
             if (fabsf(pos_ist - (float) start) <= 3.0f) return false;
             id(mischer_fahre_position).execute(start);
             id(mischer_pos) = (float) start;
+            id(pos_gesendet) = start;
             return true;
           };
 
@@ -1501,6 +1514,7 @@ script:
               ESP_LOGI("regelung", "P85: Powerbetrieb -> Mischer auf 100%% (Ist %.1f%%)", pos_ist);
               id(mischer_fahre_position).execute(100);
               id(mischer_pos) = 100.0f;
+              id(pos_gesendet) = 100;
               id(hzg_power_gesendet) = true;
             }
             return;
@@ -1597,6 +1611,7 @@ script:
           if (id(hzg_vl_unerreichbar) && !p65_frei) {
             id(letzte_prioritaet) = 65;
             id(pos_ziel) = 0.0f;
+            id(pos_gesendet) = 0;
             // ZU beim Eintritt und solange das Ist noch nicht zu meldet
             if (p65_eintritt || pos_ist > 2.0f) id(ha_mischer_zu).execute();
             return;
@@ -1639,9 +1654,13 @@ script:
           float untergrenze = min(id(pos_min).state, pos_alt);
           id(pos_ziel) = max(untergrenze, min(100.0f, pos_alt + delta));
           int ziel = (int) roundf(id(pos_ziel));
-          if (ziel == (int) roundf(pos_alt)) {
+          // Mindestschrittweite (MISCHER_MINSCHRITT) gegenüber dem letzten Befehl, der Integrator läuft solange weiter.
+          // Anschläge und Untergrenze immer anfahren, sonst bliebe ein Rest unter der Schrittweite stehen
+          int gesendet = id(pos_gesendet);
+          bool anschlag = (delta > 0) ? (ziel >= 100) : (ziel <= (int) roundf(untergrenze));
+          if (ziel == gesendet || (abs(ziel - gesendet) < ${MISCHER_MINSCHRITT} && !anschlag)) {
             id(letzte_prioritaet) = 0;
-            ESP_LOGI("regelung", "P0: Zielposition %.2f%% -> noch %d%%, nichts zu senden", id(pos_ziel), ziel);
+            ESP_LOGI("regelung", "P0: Zielposition %.2f%% (letzter Befehl %d%%) -> unter Mindestschritt, nichts zu senden", id(pos_ziel), gesendet);
             return;
           }
 
@@ -1650,6 +1669,7 @@ script:
                    id(letzte_prioritaet), fehler, ziel, pos_ist);
           id(mischer_fahre_position).execute(ziel);
           id(mischer_pos) = (float) ziel;
+          id(pos_gesendet) = ziel;
 
 interval:
   - interval: 15s
