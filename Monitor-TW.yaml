@@ -8,7 +8,11 @@ substitutions:
   # HZG Grenzen der Raum-Solltemperatur (Frostschutz unten), gelten auch für die Werte im Zeitplan
   HZG_FROST_MIN: "12.0"
   HZG_TEMP_MAX: "23.0"
-  # HZG Zeitplan: höchstens so viele Schaltpunkte in input_text.hzg_zeiten / hzg_temperaturen
+  # HZG Zeitplan: höchstens so viele Schaltpunkte in input_text.hzg_zeiten / hzg_temperaturen.
+  # Schaltzeiten als HH:MM oder relativ zur Sonne: SA = Sonnenaufgang, SU = Sonnenuntergang, mit Versatz in Minuten
+  # (z. B. "SA-20", "SU+30", "SU"); Versatz höchstens +-240 min. Die Reihenfolge in der Liste ist frei,
+  # sortiert wird täglich nach der tatsächlichen Uhrzeit
+  HZG_SONNE_MAX: "240"
   HZG_PLAN_MAX: "10"
   # Betriebsmodus (Index im Select HZG_Betriebsmodus, Reihenfolge der Optionen nicht ändern)
   BETRIEBSMODUS: "id(hzg_betriebsmodus).active_index().value_or(0)"
@@ -112,6 +116,14 @@ api:
 time:
   - platform: homeassistant
     id: ha_time
+
+# Sonnenstand für Schaltzeiten SA/SU im HZG-Zeitplan, wird im ESP berechnet (keine Abhängigkeit von HA außer der Uhrzeit).
+# Koordinaten stehen in secrets.yaml (Repo ist öffentlich), zwei Nachkommastellen genügen
+sun:
+  id: hzg_sonne
+  time_id: ha_time
+  latitude: !secret hzg_breitengrad
+  longitude: !secret hzg_laengengrad
 
 globals:
   # Ringpuffer Vorlauf
@@ -252,12 +264,26 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
-  # HZG Zeitplan aus input_text.hzg_zeiten (Minuten ab Mitternacht, aufsteigend) und input_text.hzg_temperaturen (°C)
+  # HZG Zeitplan aus input_text.hzg_zeiten und input_text.hzg_temperaturen (°C)
   # Bei ungültigen Listen bleibt die letzte gültige Fassung aktiv
   - id: hzg_plan_n
     type: int
     restore_value: false
     initial_value: '0'
+  # Liste wie eingegeben: Typ (0 = feste Uhrzeit, 1 = Sonnenaufgang, 2 = Sonnenuntergang), Wert (Minuten ab Mitternacht bzw. Versatz), Temperatur
+  - id: hzg_plan_def_typ
+    type: int[${HZG_PLAN_MAX}]
+    restore_value: false
+    initial_value: '{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}'
+  - id: hzg_plan_def_wert
+    type: int[${HZG_PLAN_MAX}]
+    restore_value: false
+    initial_value: '{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}'
+  - id: hzg_plan_def_temp
+    type: float[${HZG_PLAN_MAX}]
+    restore_value: false
+    initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
+  # Schaltpunkte des laufenden Tages (Minuten ab Mitternacht, aufsteigend sortiert), werden in hzg_aussen jeden Zyklus aus der Liste berechnet
   - id: hzg_plan_min
     type: int[${HZG_PLAN_MAX}]
     restore_value: false
@@ -266,6 +292,11 @@ globals:
     type: float[${HZG_PLAN_MAX}]
     restore_value: false
     initial_value: '{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}'
+  # zuletzt protokollierte Schaltzeiten des Tages (Log nur bei Änderung, also bei neuer Liste und wenn sich SA/SU verschieben)
+  - id: hzg_plan_eff_text
+    type: std::string
+    restore_value: false
+    initial_value: '""'
   # zuletzt ausgewertete Texte beider Listen: HA schickt sie bei jeder Neuverbindung erneut, ausgewertet wird nur eine echte Änderung
   - id: hzg_plan_text
     type: std::string
@@ -618,7 +649,7 @@ text_sensor:
             id(hzg_save_ms) = millis();
             ESP_LOGI("hzg", "Lerntabelle aus HA geladen: %s", x.c_str());
 
-  # HZG Zeitplan aus HA: Schaltzeiten "HH:MM;HH:MM;..." und Temperaturen "20;21;18" (gleich viele Einträge)
+  # HZG Zeitplan aus HA: Schaltzeiten "HH:MM;SA-20;SU+30;..." und Temperaturen "20;21;18" (gleich viele Einträge)
   - platform: homeassistant
     id: hzg_zeiten_ha
     entity_id: input_text.hzg_zeiten
@@ -991,7 +1022,8 @@ script:
             }
             return v;
           };
-          int mins[${HZG_PLAN_MAX}];
+          int typen[${HZG_PLAN_MAX}];
+          int werte[${HZG_PLAN_MAX}];
           float temps[${HZG_PLAN_MAX}];
           int n = 0;
           // Prüfung, liefert den Fehlertext oder "" bei gültiger Liste
@@ -1002,13 +1034,32 @@ script:
             if (n != (int) t.size() || n < 1 || n > ${HZG_PLAN_MAX})
               return str_sprintf("%d Zeiten, %d Temperaturen (1-${HZG_PLAN_MAX}, gleich viele)", n, (int) t.size());
             for (int k = 0; k < n; k++) {
-              int h, m;
-              char rest;
-              if (sscanf(z[k].c_str(), "%d:%d%c", &h, &m, &rest) != 2 || h < 0 || h > 23 || m < 0 || m > 59)
-                return "Zeit '" + z[k] + "'";
-              mins[k] = h * 60 + m;
-              if (k > 0 && mins[k] <= mins[k - 1])
-                return "Zeiten nicht aufsteigend ('" + z[k] + "')";
+              std::string zz = z[k];
+              for (auto &c : zz) c = toupper((unsigned char) c);
+              if (zz.rfind("SA", 0) == 0 || zz.rfind("SU", 0) == 0) {
+                // relativ zur Sonne: SA/SU, optional +-Minuten
+                typen[k] = (zz[1] == 'A') ? 1 : 2;
+                std::string rest = zz.substr(2);
+                rest.erase(std::remove(rest.begin(), rest.end(), ' '), rest.end());
+                int off = 0;
+                if (!rest.empty()) {
+                  char *ende = nullptr;
+                  long v = strtol(rest.c_str(), &ende, 10);
+                  if ((rest[0] != '+' && rest[0] != '-') || ende == nullptr || *ende != '\0' || labs(v) > ${HZG_SONNE_MAX})
+                    return "Zeit '" + z[k] + "' (SA/SU mit Versatz +-${HZG_SONNE_MAX} min, z. B. SU+30)";
+                  off = (int) v;
+                }
+                werte[k] = off;
+              } else {
+                int h, m;
+                char rest;
+                if (sscanf(z[k].c_str(), "%d:%d%c", &h, &m, &rest) != 2 || h < 0 || h > 23 || m < 0 || m > 59)
+                  return "Zeit '" + z[k] + "' (HH:MM, SA+-min oder SU+-min)";
+                typen[k] = 0;
+                werte[k] = h * 60 + m;
+                for (int j = 0; j < k; j++)
+                  if (typen[j] == 0 && werte[j] == werte[k]) return "Zeit '" + z[k] + "' doppelt";
+              }
               std::string tt = t[k];
               for (auto &c : tt) if (c == ',') c = '.';
               char *ende = nullptr;
@@ -1030,8 +1081,9 @@ script:
             return;
           }
           for (int k = 0; k < n; k++) {
-            id(hzg_plan_min)[k] = mins[k];
-            id(hzg_plan_temp)[k] = temps[k];
+            id(hzg_plan_def_typ)[k] = typen[k];
+            id(hzg_plan_def_wert)[k] = werte[k];
+            id(hzg_plan_def_temp)[k] = temps[k];
           }
           id(hzg_plan_n) = n;
           id(hzg_plan_neu) = true;
@@ -1092,10 +1144,50 @@ script:
           }
           bool sensor_ok = id(hzg_raum_f_ok) && (uint32_t)(jetzt - id(hzg_sensor_ms)) < 1200000UL;
 
-          // Zeitplan: aktueller Abschnitt und nächster Schaltpunkt
+          // Zeitplan: Schaltzeiten des Tages berechnen (SA/SU = heutiger Sonnenaufgang/-untergang + Versatz)
+          // und nach der Uhrzeit sortieren. Ohne gültige Uhrzeit oder Sonnenzeiten gilt der Plan als nicht verfügbar
           int n = id(hzg_plan_n);
           auto zeit = id(ha_time).now();
-          bool plan_ok = n > 0 && zeit.is_valid();
+          bool sonne_ok = true;
+          if (n > 0 && zeit.is_valid()) {
+            bool braucht_sonne = false;
+            for (int k = 0; k < n; k++) if (id(hzg_plan_def_typ)[k] != 0) braucht_sonne = true;
+            int sa = -1, su = -1;
+            if (braucht_sonne) {
+              // Bezugszeitpunkt kurz nach Mitternacht (Ortszeit): die Sonnenkomponente liefert das nächste Ereignis danach, also das heutige
+              ESPTime d0 = ESPTime::from_epoch_utc(id(ha_time).utcnow().timestamp - (zeit.hour * 3600 + zeit.minute * 60 + zeit.second) + 60);
+              auto a = id(hzg_sonne).sunrise(d0, -0.833);
+              auto u = id(hzg_sonne).sunset(d0, -0.833);
+              if (a.has_value()) sa = a->hour * 60 + a->minute;
+              if (u.has_value()) su = u->hour * 60 + u->minute;
+              sonne_ok = sa >= 0 && su >= 0;
+            }
+            if (sonne_ok) {
+              int mn[${HZG_PLAN_MAX}], ix[${HZG_PLAN_MAX}];
+              for (int k = 0; k < n; k++) {
+                int t = id(hzg_plan_def_typ)[k], w = id(hzg_plan_def_wert)[k];
+                mn[k] = max(0, min(1439, t == 0 ? w : (t == 1 ? sa : su) + w));
+                ix[k] = k;
+              }
+              // stabil sortieren (bei gleicher Uhrzeit bleibt die Reihenfolge der Liste, der spätere Eintrag gilt)
+              for (int i = 1; i < n; i++)
+                for (int j = i; j > 0 && mn[ix[j - 1]] > mn[ix[j]]; j--) std::swap(ix[j - 1], ix[j]);
+              std::string txt;
+              for (int k = 0; k < n; k++) {
+                id(hzg_plan_min)[k] = mn[ix[k]];
+                id(hzg_plan_temp)[k] = id(hzg_plan_def_temp)[ix[k]];
+                txt += str_sprintf("%s%02d:%02d=%.1f", k ? " " : "", mn[ix[k]] / 60, mn[ix[k]] % 60, id(hzg_plan_def_temp)[ix[k]]);
+              }
+              if (txt != id(hzg_plan_eff_text)) {
+                id(hzg_plan_eff_text) = txt;
+                if (braucht_sonne) ESP_LOGI("hzg", "Schaltzeiten heute (SA %02d:%02d, SU %02d:%02d): %s", sa / 60, sa % 60, su / 60, su % 60, txt.c_str());
+                else ESP_LOGI("hzg", "Schaltzeiten heute: %s", txt.c_str());
+              }
+            } else {
+              ESP_LOGW("hzg", "Sonnenauf-/untergang nicht berechenbar, Zeitplan ausgesetzt");
+            }
+          }
+          bool plan_ok = n > 0 && zeit.is_valid() && sonne_ok;
           bool plan_neu = id(hzg_plan_neu);
           bool party = (idx == ${BM_PARTY});
           int seg = -1, nxt = -1, min_bis_nxt = 0;
