@@ -30,9 +30,8 @@ substitutions:
   ST_POWER: "5"
   ST_FALLBACK: "6"
   ST_MANUELL: "7"
-  # Dallas-Bus: erwartete Anzahl Fühler (Index 0 Rücklauf, 1 RaumTemp Keller, 2 Zulauf, 3 Vorlauf) und Wartezeit für die Konversion
+  # Dallas-Bus: erwartete Anzahl Fühler (Index 0 Rücklauf, 1 RaumTemp Keller, 2 Zulauf, 3 Vorlauf)
   DALLAS_ANZAHL: "4"
-  DALLAS_WARTEZEIT: "850ms"
   # Ringpuffer Vorlauf: 12 Werte à 15 s = 3 min
   VL_PUFFER: "12"
   # Mischer-Aktor: Entität in HA, muss ein Cover mit Position sein (set_cover_position, close_cover, stop_cover, Attribut current_position).
@@ -47,13 +46,19 @@ substitutions:
   # hängt am Mischerweg (Zulauf fällt zwischen den Brennerstarts um 10-15 K), nicht am Totband (1.5 K brachte keine Ersparnis)
   MISCHER_MINSCHRITT: "2"
 
-esp32:
-  board: lolin32_lite
-  framework:
-    type: esp-idf
+# Wemos D1 Mini (ESP8266). Pinbelegung der Lochrasterplatine (gemeinsamer Steckplatz Lolin32 Lite / D1 Mini):
+# 1-Wire D2 = GPIO4, Ultraschall Trigger D1 = GPIO5, Echo D5 = GPIO14, Relais Auf D6 = GPIO12 / Zu D7 = GPIO13 (noch nicht genutzt)
+esp8266:
+  board: d1_mini
+  # Einstellungen (Numbers mit restore_value) überstehen sonst keinen Stromausfall; geschrieben wird nur bei Änderung,
+  # selten geänderte Einstellungen sind für den Flash unkritisch (entschieden 21.11.2026)
+  restore_from_flash: true
 
 esphome:
   name: monitor-tw
+  # ESP8266 mit 160 statt 80 MHz: der Regelzyklus lief mit 80 MHz knapp über 50 ms ("scheduled task took a long time")
+  platformio_options:
+    board_build.f_cpu: 160000000L
     
   on_boot:
     priority: -100.0
@@ -100,14 +105,6 @@ wifi:
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
 captive_portal:
-
-web_server:
-  port: 80
-  version: 3
-  local: true              # JS/CSS in die Firmware statt vom CDN laden
-  auth:                    # optional, empfehlenswert
-    username: admin
-    password: !secret web_password
 
 ota:
   - platform: esphome
@@ -567,20 +564,14 @@ number:
     restore_value: true
     unit_of_measurement: "min"
 
-esp32_touch:
-  setup_mode: false    
-  low_voltage_reference: 0.8V  # One of 0.5V, 0.6V, 0.7V, 0.8V. Default is 0.5V.
-  high_voltage_reference: 2.4V    # One of 2.4V, 2.5V, 2.6V, 2.7V. Default is 2.7V.
-  voltage_attenuation: 0V    # One of 1.5V, 1V, 0.5V, 0V. Default is 0V.
-  
 one_wire:
   - platform: gpio
-    pin: GPIO26
+    pin: GPIO4         # D2
     id: ow_bus  # für die Prüfung der Fühleranzahl beim Start
 
 output:
   - platform: gpio
-    pin: GPIO22
+    pin: GPIO2         # D4, eingebaute LED des D1 Mini (low-aktiv)
     id: 'GPLEDint'
 
 switch:
@@ -694,14 +685,6 @@ binary_sensor:
     name: "Statussensor"
     id: statussensor
     
-  - platform: esp32_touch
-    name: "esp32touchpad"
-    id: "esp32touchpad"
-    pin: GPIO14
-    threshold: 110
-    on_press:
-      then:
-        - component.update: touch_raw_sensor
   # Sensorfehler der Dallas-Fühler, Regelung steht (P97)
   - platform: template
     name: "HZG_Sensorfehler"
@@ -764,14 +747,22 @@ sensor:
     id: vorlauf 
     update_interval: never
     state_class: measurement
-  - platform: template
-    name: "Raw touch value"
-    id: touch_raw_sensor
-    device_class: "frequency"
-    unit_of_measurement: "kHz"
-    lambda: |-
-        return id(esp32touchpad).get_value();
-    update_interval: 30s
+  # Überlaufeimer des Ausgleichsbehälters: Abstand Sensor -> Wasseroberfläche (RCW-0001 am Abflussrohr über dem Eimer).
+  # Füllstand = Abstand bei leerem Eimer - aktueller Abstand; Meldung an HA nur bei Änderung ab 5 mm
+  - platform: ultrasonic
+    name: "Ultraschall Abstand"
+    id: ultraschall_abstand
+    trigger_pin: GPIO5   # D1
+    echo_pin: GPIO14     # D5
+    update_interval: 60s
+    accuracy_decimals: 3
+    device_class: distance 
+    state_class: measurement
+    filters:
+      - median:
+          window_size: 5
+          send_every: 1
+      - delta: 0.005
   - platform: homeassistant
     name: "Außentemperatur"
     entity_id: sensor.tempext
@@ -1678,7 +1669,7 @@ interval:
       - component.update: zulauf
       - component.update: ruecklauf
       - component.update: vorlauf
-      - delay: ${DALLAS_WARTEZEIT}  # warten bis Dallas-Konversion fertig
+      - delay: 850ms  # warten bis Dallas-Konversion fertig (DS18B20 12 Bit: 750 ms + Reserve)
       - component.update: vl_rl_diff
       - script.execute: puffer_schreiben
       - script.wait: puffer_schreiben
