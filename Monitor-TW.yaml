@@ -8,6 +8,9 @@ substitutions:
   # HZG Grenzen der Raum-Solltemperatur (Frostschutz unten), gelten auch für die Werte im Zeitplan
   HZG_FROST_MIN: "12.0"
   HZG_TEMP_MAX: "23.0"
+  # Obergrenze der Number HZG_Wunschtemp: im Vorlaufbetrieb ist sie der Soll-Vorlauf. In den Raum-Modi wird der Wert
+  # intern auf HZG_FROST_MIN..HZG_TEMP_MAX geklemmt, im Vorlaufbetrieb auf 20 °C .. Vorlauf-Max - 2 K
+  HZG_WUNSCH_MAX: "80.0"
   # HZG Zeitplan: höchstens so viele Schaltpunkte in input_text.hzg_zeiten / hzg_temperaturen.
   # Schaltzeiten als HH:MM oder relativ zur Sonne: SA = Sonnenaufgang, SU = Sonnenuntergang, mit Versatz in Minuten
   # (z. B. "SA-20", "SU+30", "SU"); Versatz höchstens +-240 min. Die Reihenfolge in der Liste ist frei,
@@ -21,6 +24,7 @@ substitutions:
   BM_POWER: "2"
   BM_MANUELL: "3"
   BM_KENNLINIE: "4"
+  BM_VORLAUF: "5"
   # Interner Zustand der Raumregelung (HZG_Modus)
   ST_KENNLINIE: "0"
   ST_HEIZEN: "1"
@@ -30,6 +34,7 @@ substitutions:
   ST_POWER: "5"
   ST_FALLBACK: "6"
   ST_MANUELL: "7"
+  ST_VORLAUF: "8"
   # Dallas-Bus: erwartete Anzahl Fühler (Index 0 Rücklauf, 1 RaumTemp Keller, 2 Zulauf, 3 Vorlauf)
   DALLAS_ANZAHL: "4"
   # Ringpuffer Vorlauf: 12 Werte à 15 s = 3 min
@@ -529,12 +534,13 @@ number:
   
   # HZG Einstellungen der Raumregelung
   # Raum-Soll: wird im Regelbetrieb an jedem Schaltpunkt aus dem Zeitplan gesetzt (Handänderung gilt bis zum nächsten Schaltpunkt),
-  # im Partybetrieb nicht, dort wird die Temperatur nur über diesen Wert eingestellt
+  # im Partybetrieb nicht, dort wird die Temperatur nur über diesen Wert eingestellt.
+  # Im Vorlaufbetrieb ist der Wert der Soll-Vorlauf (nur von Hand oder per Automation, nicht aus dem Zeitplan)
   - platform: template
     name: "HZG_Wunschtemp"
     id: hzg_wunschtemp
     min_value: ${HZG_FROST_MIN}
-    max_value: ${HZG_TEMP_MAX}
+    max_value: ${HZG_WUNSCH_MAX}
     step: 0.5
     initial_value: 21.0
     optimistic: true
@@ -599,6 +605,7 @@ select:
       - "Powerbetrieb"
       - "Manuell"
       - "Kennlinie"
+      - "Vorlaufbetrieb"
     initial_option: "Regelbetrieb"
     restore_value: true
     on_value:
@@ -678,6 +685,7 @@ text_sensor:
         case ${ST_POWER}:     return std::string("Power");
         case ${ST_FALLBACK}:  return std::string("Fallback");
         case ${ST_MANUELL}:   return std::string("Manuell");
+        case ${ST_VORLAUF}:   return std::string("Vorlauf");
         default:              return std::string("Kennlinie");
       }
 binary_sensor:
@@ -1072,8 +1080,8 @@ script:
           std::string fehler = pruefen();
           if (!fehler.empty()) {
             ESP_LOGW("hzg", "Zeitplan ungültig: %s (alter Plan bleibt gespeichert)", fehler.c_str());
-            // im Modus Kennlinie wird die Liste nicht benutzt: kein Umschalten (würde die Raumregelung ungefragt einschalten)
-            if (${BETRIEBSMODUS} == ${BM_KENNLINIE}) return;
+            // in den Modi Kennlinie und Vorlaufbetrieb wird die Liste nicht benutzt: kein Umschalten (würde die Raumregelung ungefragt einschalten)
+            if (${BETRIEBSMODUS} == ${BM_KENNLINIE} || ${BETRIEBSMODUS} == ${BM_VORLAUF}) return;
             ESP_LOGW("hzg", "-> Partybetrieb mit 21 °C, zurück in den Regelbetrieb nur von Hand");
             if (${BETRIEBSMODUS} != ${BM_PARTY}) id(hzg_betriebsmodus).make_call().set_index(${BM_PARTY}).perform();
             id(hzg_wunschtemp).make_call().set_value(21.0f).perform();
@@ -1111,8 +1119,9 @@ script:
             id(hzg_betriebsmodus).make_call().set_index(${BM_REGEL}).perform();
             idx = ${BM_REGEL};
           }
-          // Power UND Manuell lösen die 2-h-Lernsperre aus (Raum von Hand beeinflusst)
-          if (idx == ${BM_POWER} || idx == ${BM_MANUELL}) {
+          // Power, Manuell und Vorlaufbetrieb lösen die 2-h-Lernsperre aus (Raum von außen bestimmt)
+          bool vorlaufbetrieb = (idx == ${BM_VORLAUF});
+          if (idx == ${BM_POWER} || idx == ${BM_MANUELL} || vorlaufbetrieb) {
             id(hzg_power_zuletzt) = jetzt;
             id(hzg_power_gesehen) = true;
           }
@@ -1210,7 +1219,7 @@ script:
           // Einmal gestartet bleibt es bis zum Schaltpunkt (danach zeigt nxt auf den folgenden Punkt)
           float auf_min = 0.0f;
           if (id(hzg_aufheiz_ziel) != nxt || plan_neu) id(hzg_aufheiz_ziel) = -1;
-          if (plan_ok && n > 1 && !party) {
+          if (plan_ok && n > 1 && !party && !vorlaufbetrieb) {
             float t_akt = id(hzg_plan_temp)[seg];
             float t_neu = id(hzg_plan_temp)[nxt];
             if (t_neu > t_akt + 0.01f && sensor_ok) {
@@ -1235,9 +1244,10 @@ script:
           id(hzg_aufheiz_min) = auf_min;
           bool aufheizen = id(hzg_aufheiz_ziel) >= 0;
 
-          // HZG_Wunschtemp aus dem Plan setzen (nicht im Partybetrieb). Geschrieben wird nur, wenn sich der Planwert ändert
-          // (Schaltpunkt, Vorheizbeginn, neue Liste, Ende Party), eine Handänderung gilt so bis zum nächsten Schaltpunkt
-          if (plan_ok && !party) {
+          // HZG_Wunschtemp aus dem Plan setzen (nicht im Party- und Vorlaufbetrieb). Geschrieben wird nur, wenn sich der Planwert ändert
+          // (Schaltpunkt, Vorheizbeginn, neue Liste, Ende Party/Vorlaufbetrieb), eine Handänderung gilt so bis zum nächsten Schaltpunkt.
+          // Nach dem Vorlaufbetrieb muss sofort neu gesetzt werden, sonst stünde der Soll-Vorlauf weiter als Raum-Soll drin
+          if (plan_ok && !party && !vorlaufbetrieb) {
             float soll_plan = id(hzg_plan_temp)[aufheizen ? nxt : seg];
             if (plan_neu || id(hzg_party_prev) || fabsf(soll_plan - id(hzg_plan_soll_gesetzt)) > 0.01f) {
               id(hzg_plan_soll_gesetzt) = soll_plan;
@@ -1248,7 +1258,7 @@ script:
             }
           }
           if (plan_ok) id(hzg_plan_neu) = false;
-          id(hzg_party_prev) = party;
+          id(hzg_party_prev) = party || vorlaufbetrieb;
           float wunsch = id(hzg_wunschtemp).state;
 
           // Interner Zustand
@@ -1256,13 +1266,15 @@ script:
           if (idx == ${BM_POWER})                    modus = ${ST_POWER};
           else if (idx == ${BM_MANUELL})             modus = ${ST_MANUELL};
           else if (idx == ${BM_KENNLINIE})           modus = ${ST_KENNLINIE};  // reine Heizkurve, keine Raumregelung
+          else if (vorlaufbetrieb)                   modus = ${ST_VORLAUF};    // Soll-VL = HZG_Wunschtemp, keine Raumregelung
           else if (!sensor_ok || !id(hzg_geladen))   modus = ${ST_FALLBACK};
           else if (party)                            modus = ${ST_PARTY};
           else if (aufheizen)                        modus = ${ST_AUFHEIZEN};
           else if (tiefster)                         modus = ${ST_ABSENKEN};
           else                                       modus = ${ST_HEIZEN};
 
-          float soll_raum = max(FROST_MIN, wunsch);
+          // Klemmung, weil die Number für den Vorlaufbetrieb bis HZG_WUNSCH_MAX reicht (Vertipper wirkt hier höchstens als HZG_TEMP_MAX)
+          float soll_raum = max(FROST_MIN, min((float) ${HZG_TEMP_MAX}, wunsch));
 
           // Aufheizzeit nachführen: am Schaltpunkt mit Anstieg die beim Vorheizen gemessene Heizrate (min/K) einlernen.
           // Nur wenn tatsächlich vorgeheizt wurde (ohne Vorheizen sagt der Raumfehler nichts über die Heizrate)
@@ -1422,8 +1434,9 @@ script:
           // BLOCK 1: Alle Berechnungen (immer ausführen)
           // -------------------------------------------------------
 
-          // Heizkurve
-          float soll_vl = id(soll_vorlauf).state;
+          // Heizkurve, im Vorlaufbetrieb stattdessen HZG_Wunschtemp als Soll-Vorlauf (hzg_korr ist dort 0)
+          bool vorlaufbetrieb = (${BETRIEBSMODUS} == ${BM_VORLAUF});
+          float soll_vl = vorlaufbetrieb ? id(hzg_wunschtemp).state : id(soll_vorlauf).state;
           // HZG Korrektur aus dem äußeren Kreis aufschlagen (ohne Raumregelung ist hzg_korr = 0), immer auf 20 °C .. VL-Max - 2 K begrenzen
           soll_vl = max(20.0f, min(id(vorlauf_max).state - 2.0f, soll_vl + id(hzg_korr)));
           // HZG Absenken mit Raum über dem Absenk-Soll: Soll-VL auf die Untergrenze. Liegt er damit 2 K unter dem RL,
@@ -1517,8 +1530,15 @@ script:
 
           // PRIORITÄT 1: Heizgrenze (vor P80, sonst stellt P80 den Mischer vor und P70 fährt ihn gleich wieder zu)
           // Eintritt bei AT >= Heizgrenze, Freigabe erst HEIZGRENZE_HYST darunter; nach der Freigabe springt der Mischer unten auf die Startposition
+          // Im Vorlaufbetrieb gilt die Heizgrenze nicht; war sie aktiv, springt der Mischer unten auf die Startposition
           bool heizgrenze_ende = false;
-          if (at >= id(heizgrenze_at).state) {
+          if (vorlaufbetrieb) {
+            if (id(hzg_heizgrenze_aktiv)) {
+              id(hzg_heizgrenze_aktiv) = false;
+              heizgrenze_ende = true;
+              ESP_LOGI("regelung", "P70: Vorlaufbetrieb -> Heizgrenze aufgehoben");
+            }
+          } else if (at >= id(heizgrenze_at).state) {
             id(hzg_heizgrenze_aktiv) = true;
           } else if (id(hzg_heizgrenze_aktiv) && at < id(heizgrenze_at).state - ${HEIZGRENZE_HYST}) {
             id(hzg_heizgrenze_aktiv) = false;
@@ -1582,8 +1602,15 @@ script:
           // (Hysterese gegen Pendeln; nach dem Öffnen bleibt der RL unter dem VL, also unter dem Soll)
           // Bei der Freigabe springt der Mischer auf die Startposition, statt aus 0 % mit dem Integrator
           // hochzukriechen (dauerte 15-24 min, Vorlauf so lange 2-4 K unter Soll)
+          // Im Vorlaufbetrieb ist P65 aus (Soll-VL unter dem RL: der Mischer regelt bis zur Untergrenze pos_min herunter);
+          // war P65 aktiv, wird freigegeben (Startsprung auf die Startposition)
           bool p65_frei = false, p65_eintritt = false;
-          if (!id(hzg_vl_unerreichbar) && soll_vl < rl - 2.0f) {
+          if (vorlaufbetrieb) {
+            if (id(hzg_vl_unerreichbar)) {
+              p65_frei = true;
+              ESP_LOGI("regelung", "P65: Vorlaufbetrieb -> Regelung frei");
+            }
+          } else if (!id(hzg_vl_unerreichbar) && soll_vl < rl - 2.0f) {
             p65_eintritt = true;
             id(hzg_vl_unerreichbar) = true;
             id(hzg_vl_unerreichbar_soll) = soll_vl;
@@ -1733,6 +1760,6 @@ interval:
             heizgrenze: !lambda "return id(heizgrenze_at).state;"
             hzg_wunsch: !lambda "return id(hzg_wunschtemp).state;"
             hzg_absenkung: !lambda "return 0.0f;"  # Absenkung entfallen (Zeitplan), Spalte bleibt für das CSV-Format
-            hzg_aktiv: !lambda "return (${BETRIEBSMODUS} == ${BM_KENNLINIE}) ? 0 : 1;"  # 0 im Modus Kennlinie (früher Schalter HZG_Regelung_aktiv)
+            hzg_aktiv: !lambda "return (${BETRIEBSMODUS} == ${BM_KENNLINIE} || ${BETRIEBSMODUS} == ${BM_VORLAUF}) ? 0 : 1;"  # 0 ohne Raumregelung: Kennlinie, Vorlaufbetrieb (früher Schalter HZG_Regelung_aktiv)
 # Das csv-log kann unter codesandbox.io, login holger.g.ullrich@googlemail.com, analysiert werden. saucool.
 # im terminal mit npm run dev
