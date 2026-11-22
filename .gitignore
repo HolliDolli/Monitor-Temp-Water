@@ -1,4 +1,6 @@
 secrets.yaml
 .esphome/
 *.gcode
+*.FCBak
+*.stl
 ~*
