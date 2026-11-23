@@ -11,6 +11,9 @@ substitutions:
   # Obergrenze der Number HZG_Wunschtemp: im Vorlaufbetrieb ist sie der Soll-Vorlauf. In den Raum-Modi wird der Wert
   # intern auf HZG_FROST_MIN..HZG_TEMP_MAX geklemmt, im Vorlaufbetrieb auf 20 °C .. Vorlauf-Max - 2 K
   HZG_WUNSCH_MAX: "80.0"
+  # Boost beim Vorheizen: Mischer voll auf (Power-Pfad), bis der Raum Ziel minus diesen Wert erreicht; der Nachlauf
+  # bringt ihn dann aufs Ziel (Aufheiztest 20.-23.11.2026: Nachlauf 0,3-0,5 K)
+  HZG_BOOST_NACHLAUF: "0.3"
   # HZG Zeitplan: höchstens so viele Schaltpunkte in input_text.hzg_zeiten / hzg_temperaturen.
   # Schaltzeiten als HH:MM oder relativ zur Sonne: SA = Sonnenaufgang, SU = Sonnenuntergang, mit Versatz in Minuten
   # (z. B. "SA-20", "SU+30", "SU"); Versatz höchstens +-240 min. Die Reihenfolge in der Liste ist frei,
@@ -35,6 +38,7 @@ substitutions:
   ST_FALLBACK: "6"
   ST_MANUELL: "7"
   ST_VORLAUF: "8"
+  ST_BOOST: "9"
   # Dallas-Bus: erwartete Anzahl Fühler (Index 0 Rücklauf, 1 RaumTemp Keller, 2 Zulauf, 3 Vorlauf)
   DALLAS_ANZAHL: "4"
   # Ringpuffer Vorlauf: 12 Werte à 15 s = 3 min
@@ -405,6 +409,15 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+  # Boost: im aktuellen Zyklus aktiv (für die Regelung) und für das laufende Vorheizen schon beendet (kein Neustart)
+  - id: hzg_boost_aktiv
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: hzg_boost_fertig
+    type: bool
+    restore_value: false
+    initial_value: 'false'
   # Absenken: Raum liegt noch über dem Absenk-Soll -> nicht heizen (Soll-VL auf die Untergrenze, P65 fährt den Mischer zu)
   - id: hzg_absenk_zu
     type: bool
@@ -499,14 +512,15 @@ number:
     restore_value: true
     unit_of_measurement: "%"
 
-  # Startposition für P80 (Vorstellen bei heißem Zulauf) und nach der P65-Freigabe, typische Regelpositionen liegen bei 25-31 %
+  # Startposition für P80 (Vorstellen bei heißem Zulauf), nach der P65-Freigabe und am Ende des Powerbetriebs.
+  # Gleichgewicht laut Log 18.-23.11.2026: tagsüber ca. 30-35 %, morgens nach Absenkung/Aufheizen ca. 45-55 %
   - platform: template
     name: "Mischer Startposition"
     id: pos_start
     min_value: 0.0
     max_value: 100.0
     step: 1.0
-    initial_value: 30.0
+    initial_value: 40.0
     optimistic: true
     restore_value: true
     unit_of_measurement: "%"
@@ -638,8 +652,19 @@ text_sensor:
               ESP_LOGI("hzg", "Lerntabelle in HA leer, Start mit Nullwerten");
               return;
             }
+            // 7 Werte mit ';' getrennt; strtof statt sscanf("%f"), das sonst ca. 8 KB scanf-Float-Unterstützung nachzieht
             float v[7];
-            int n = sscanf(x.c_str(), "%f;%f;%f;%f;%f;%f;%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
+            int n = 0;
+            const char *p = x.c_str();
+            char *ende;
+            while (n < 7) {
+              v[n] = strtof(p, &ende);
+              if (ende == p) break;   // keine Zahl gefunden
+              n++;
+              p = ende;
+              if (*p != ';') break;   // Trennzeichen fehlt bzw. Ende
+              p++;
+            }
             if (n != 7) {
               ESP_LOGW("hzg", "Lerntabelle in HA unlesbar (%d Werte): %s", n, x.c_str());
               return;
@@ -686,6 +711,7 @@ text_sensor:
         case ${ST_FALLBACK}:  return std::string("Fallback");
         case ${ST_MANUELL}:   return std::string("Manuell");
         case ${ST_VORLAUF}:   return std::string("Vorlauf");
+        case ${ST_BOOST}:     return std::string("Boost");
         default:              return std::string("Kennlinie");
       }
 binary_sensor:
@@ -1119,13 +1145,14 @@ script:
             id(hzg_betriebsmodus).make_call().set_index(${BM_REGEL}).perform();
             idx = ${BM_REGEL};
           }
-          // Power, Manuell und Vorlaufbetrieb lösen die 2-h-Lernsperre aus (Raum von außen bestimmt)
+          // Power, Manuell, Vorlaufbetrieb und Boost lösen die 2-h-Lernsperre aus (Raum von außen bestimmt bzw. Nachlauf)
           bool vorlaufbetrieb = (idx == ${BM_VORLAUF});
-          if (idx == ${BM_POWER} || idx == ${BM_MANUELL} || vorlaufbetrieb) {
+          if (idx == ${BM_POWER} || idx == ${BM_MANUELL} || vorlaufbetrieb || id(hzg_boost_aktiv)) {
             id(hzg_power_zuletzt) = jetzt;
             id(hzg_power_gesehen) = true;
           }
-          if (idx != ${BM_POWER}) {
+          // im Boost (Stand Vorzyklus) läuft der Power-Pfad, dann nicht zurücksetzen (sonst Dauersendung)
+          if (idx != ${BM_POWER} && !id(hzg_boost_aktiv)) {
             id(hzg_power_gesendet) = false;
             id(hzg_power_vlmax) = false;
           }
@@ -1229,6 +1256,7 @@ script:
                 id(hzg_auf_start_ms) = jetzt;
                 id(hzg_auf_start_t) = id(hzg_raum_f);
                 id(hzg_auf_erreicht) = false;
+                id(hzg_boost_fertig) = false;
                 ESP_LOGI("hzg", "Vorheizen auf %.1f °C, Schaltpunkt in %d min", t_neu, min_bis_nxt);
               }
               // erstes Erreichen der Zieltemperatur merken: danach hält die Regelung, die Heizrate wäre verfälscht
@@ -1269,7 +1297,12 @@ script:
           else if (vorlaufbetrieb)                   modus = ${ST_VORLAUF};    // Soll-VL = HZG_Wunschtemp, keine Raumregelung
           else if (!sensor_ok || !id(hzg_geladen))   modus = ${ST_FALLBACK};
           else if (party)                            modus = ${ST_PARTY};
-          else if (aufheizen)                        modus = ${ST_AUFHEIZEN};
+          else if (aufheizen) {
+            // Boost: Mischer voll auf, bis der Raum Ziel - HZG_BOOST_NACHLAUF erreicht; danach normales Aufheizen (einmal je Vorheizen)
+            float ziel = id(hzg_plan_temp)[id(hzg_aufheiz_ziel)];
+            if (!id(hzg_boost_fertig) && id(hzg_raum_f) < ziel - ${HZG_BOOST_NACHLAUF}) modus = ${ST_BOOST};
+            else { id(hzg_boost_fertig) = true; modus = ${ST_AUFHEIZEN}; }
+          }
           else if (tiefster)                         modus = ${ST_ABSENKEN};
           else                                       modus = ${ST_HEIZEN};
 
@@ -1283,7 +1316,7 @@ script:
           int mp = id(hzg_modus_prev);
           if (plan_ok && !plan_neu && sensor_ok && id(hzg_seg_prev) >= 0 && seg != id(hzg_seg_prev)
               && id(hzg_plan_temp)[seg] > id(hzg_plan_temp)[id(hzg_seg_prev)] + 0.01f
-              && mp == ${ST_AUFHEIZEN}) {
+              && (mp == ${ST_AUFHEIZEN} || mp == ${ST_BOOST})) {
             uint32_t ende_ms = id(hzg_auf_erreicht) ? id(hzg_auf_erreicht_ms) : jetzt;
             float ende_t = id(hzg_auf_erreicht) ? id(hzg_auf_erreicht_t) : id(hzg_raum_f);
             float dauer = (uint32_t)(ende_ms - id(hzg_auf_start_ms)) / 60000.0f;
@@ -1299,13 +1332,14 @@ script:
           }
           id(hzg_seg_prev) = plan_ok ? seg : -1;
           id(hzg_modus_prev) = modus;
+          id(hzg_boost_aktiv) = (modus == ${ST_BOOST});
 
           // Korrektur des Soll-Vorlaufs: P-Anteil sofort, I-Anteil in der Tabelle (nur im Heizen/Party gelernt)
           float korr = 0.0f;
           float fehler = sensor_ok ? (soll_raum - id(hzg_raum_f)) : 0.0f;
           bool lern = false;
           float at = id(aussentemp).state;
-          if ((modus == ${ST_HEIZEN} || modus == ${ST_ABSENKEN} || modus == ${ST_AUFHEIZEN} || modus == ${ST_PARTY}) && !isnan(at)) {
+          if ((modus == ${ST_HEIZEN} || modus == ${ST_ABSENKEN} || modus == ${ST_AUFHEIZEN} || modus == ${ST_BOOST} || modus == ${ST_PARTY}) && !isnan(at)) {
             float p = (at + 10.0f) / 5.0f;
             p = max(0.0f, min(5.0f, p));
             int i0 = min(4, (int) p);
@@ -1484,8 +1518,10 @@ script:
           // BLOCK 2: Prioritäten und Aktionen
           // -------------------------------------------------------
 
-          // HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht
-          if (${BETRIEBSMODUS} == ${BM_POWER}) {
+          // HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht.
+          // Boost beim Vorheizen nutzt denselben Pfad, aber nicht oberhalb der Heizgrenze (Stand Vorzyklus)
+          bool boost = id(hzg_boost_aktiv) && !id(hzg_heizgrenze_aktiv);
+          if (${BETRIEBSMODUS} == ${BM_POWER} || boost) {
             id(hzg_power_war_aktiv) = true;
             id(hzg_anfahr_zyklen) = 0;
             // Hysterese 5 K, damit der Mischer nicht zwischen ZU und 100 % pendelt
@@ -1515,7 +1551,7 @@ script:
             id(letzte_prioritaet) = 85;
             id(pos_ziel) = 100.0f;
             if (!id(hzg_power_gesendet)) {
-              ESP_LOGI("regelung", "P85: Powerbetrieb -> Mischer auf 100%% (Ist %.1f%%)", pos_ist);
+              ESP_LOGI("regelung", "P85: %s -> Mischer auf 100%% (Ist %.1f%%)", boost ? "Boost" : "Powerbetrieb", pos_ist);
               id(mischer_fahre_position).execute(100);
               id(mischer_pos) = 100.0f;
               id(pos_gesendet) = 100;
