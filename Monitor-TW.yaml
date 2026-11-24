@@ -1518,7 +1518,7 @@ script:
           // BLOCK 2: Prioritäten und Aktionen
           // -------------------------------------------------------
 
-          // HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht.
+          // HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf (Befehl wird nachgesendet, bis der Mischer oben ist). P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht.
           // Boost beim Vorheizen nutzt denselben Pfad, aber nicht oberhalb der Heizgrenze (Stand Vorzyklus)
           bool boost = id(hzg_boost_aktiv) && !id(hzg_heizgrenze_aktiv);
           if (${BETRIEBSMODUS} == ${BM_POWER} || boost) {
@@ -1550,8 +1550,15 @@ script:
             }
             id(letzte_prioritaet) = 85;
             id(pos_ziel) = 100.0f;
-            if (!id(hzg_power_gesendet)) {
-              ESP_LOGI("regelung", "P85: %s -> Mischer auf 100%% (Ist %.1f%%)", boost ? "Boost" : "Powerbetrieb", pos_ist);
+            // jeden Zyklus nachsenden, solange der Mischer nicht oben ist (Ist < 97 %, falls der Aktor oben nur 99 % meldet).
+            // Fängt verworfene, verlorene oder durch eine Gegenfahrt überholte Befehle ab: am 24.11.2026 fuhr der Aktor
+            // einen ZU-Befehl (P65 beim kurzen Regelbetrieb nach Ablauf von HZG_Power_Dauer) bis 0 % durch und
+            // verwarf den einmaligen 100-%-Befehl, der Powerbetrieb blieb danach mit geschlossenem Mischer stehen
+            if (!id(hzg_power_gesendet) || pos_ist < 97.0f) {
+              if (!id(hzg_power_gesendet))
+                ESP_LOGI("regelung", "P85: %s -> Mischer auf 100%% (Ist %.1f%%)", boost ? "Boost" : "Powerbetrieb", pos_ist);
+              else
+                ESP_LOGD("regelung", "P85: Mischer noch nicht oben (Ist %.1f%%) -> 100%% nachgesendet", pos_ist);
               id(mischer_fahre_position).execute(100);
               id(mischer_pos) = 100.0f;
               id(pos_gesendet) = 100;
