@@ -192,6 +192,11 @@ globals:
     type: int
     restore_value: false
     initial_value: '-1'
+  # Aktor-Ist des letzten Zyklus in %, Fahrtrichtung des Aktors im Powerbetrieb (-1 = unbekannt)
+  - id: pos_ist_alt
+    type: float
+    restore_value: false
+    initial_value: '-1.0'
   # HZG Zustand der Raumregelung
   # Gelernte Korrektur des Soll-Vorlaufs (K) an den Stützstellen AT = -10, -5, 0, 5, 10, 15 °C, dazwischen wird linear interpoliert
   # Kein restore_value (Flash-Schonung): Die Tabelle wird in HA im input_text.hzg_lerntabelle gesichert und beim Start von dort gelesen
@@ -1151,11 +1156,6 @@ script:
             id(hzg_power_zuletzt) = jetzt;
             id(hzg_power_gesehen) = true;
           }
-          // im Boost (Stand Vorzyklus) läuft der Power-Pfad, dann nicht zurücksetzen (sonst Dauersendung)
-          if (idx != ${BM_POWER} && !id(hzg_boost_aktiv)) {
-            id(hzg_power_gesendet) = false;
-            id(hzg_power_vlmax) = false;
-          }
 
           // Fensterkontakt: solange offen, Zeitpunkt nachführen
           if (id(hzg_fenster).state) {
@@ -1414,6 +1414,28 @@ script:
     mode: single
     then:
       - lambda: |-
+          // Prioritätscodes (Sensor "Mischer Letzte Priorität", CSV-Spalte prioritaet), Prüfreihenfolge von oben nach unten:
+          //   100/99 Boot bzw. Manuell, 97 Sensorfehler, 94/92 Außentemperatur/Heizkurve fehlt,
+          //   85 Power/Boost (Mischer auf; darin 60 Vorlauf-Max, 50 Kessel-Schutz), 70 Heizgrenze, 80 alle Ventile zu,
+          //   60 Vorlauf-Max, 50 Kessel-Schutz, 65 Soll-VL unter RL (zu), 66 fährt auf die Startposition,
+          //   55 Kessel kalt (halten), 0 Totband/unter Mindestschritt, +1/-1 Mischer auf/zu gestellt
+
+          // Konstanten
+          const float POS_OBEN        = 97.0f;  // % ab hier gilt der Mischer als oben (Aktor meldet oben teils nur 99 %)
+          const float POS_ZU          = 2.0f;   // % bis hier gilt der Mischer als zu
+          const float POS_START_TOL   = 3.0f;   // % Abweichung, ab der auf die Startposition gefahren bzw. noch gewartet wird
+          const float POS_ANGLEICH    = 5.0f;   // % Abweichung Ist/Ziel, ab der das Ziel ans Ist angeglichen wird (Eingriff von außen)
+          const float POS_RICHTUNG    = 0.5f;   // % Änderung des Ist je Zyklus, ab der der Aktor als fahrend gilt
+          const int   ANFAHR_ZYKLEN   = 12;     // höchstens so viele Zyklen (3 min) auf das Erreichen der Startposition warten
+          const float SCHRITT_MAX     = 2.0f;   // % Positionsschritt je Zyklus höchstens
+          const float POWER_VLMAX_HYST = 5.0f;  // K Hysterese Vorlauf-Max im Powerbetrieb (gegen Pendeln ZU/100 %)
+          const float P80_ZL_UEBER    = 15.0f;  // K Zulauf über Soll-VL, ab der bei geschlossenen Ventilen vorgestellt wird
+          const float P65_EIN         = 2.0f;   // K Soll-VL unter RL für den Eintritt
+          const float P65_FREI_ANSTIEG = 1.0f;  // K Anstieg des Soll-VL über seinen Tiefstwert für die Freigabe ...
+          const float P65_FREI_RL     = 1.0f;   // ... wenn er dann höchstens so weit unter dem RL liegt
+          const float P65_FREI_ABK    = 3.0f;   // K RL unter Soll-VL: Freigabe unabhängig vom Anstieg
+          const float P55_SPREIZUNG   = 5.0f;   // K ZL-RL, darunter hat der Mischer keine Wirkung
+
           // Priorität des letzten Zyklus: Stopp-/Zu-Befehle nur beim Eintritt in eine Priorität senden, nicht alle 15 s
           int prio_alt = id(letzte_prioritaet);
           // Sicherheitschecks
@@ -1423,6 +1445,28 @@ script:
           // Mischerposition in % direkt aus dem Aktor-Ist, auch im Modus Manuell
           if (!isnan(id(mischer_aktor_position_ist).state)) {
             id(mischer_pos) = id(mischer_aktor_position_ist).state;
+          }
+          float pos_ist = id(mischer_pos);
+          // Ist des Vorzyklus merken (Fahrtrichtung für den Powerbetrieb), -1 = unbekannt
+          float pos_vorher = id(pos_ist_alt);
+          id(pos_ist_alt) = isnan(id(mischer_aktor_position_ist).state) ? -1.0f : id(mischer_aktor_position_ist).state;
+
+          // Mischer zu und zu halten: ZU beim Eintritt in die Priorität und solange das Ist noch nicht zu meldet.
+          // Liefert true, wenn ein ZU-Befehl gesendet wurde (für die Logmeldung beim Aufrufer)
+          auto zu_halten = [&](int prio) -> bool {
+            id(letzte_prioritaet) = prio;
+            if (prio_alt == prio && pos_ist <= POS_ZU) return false;
+            id(ha_mischer_zu).execute();
+            return true;
+          };
+
+          // Power-Pfad (Powerbetrieb oder Boost beim Vorheizen, Boost nicht oberhalb der Heizgrenze, beides Stand Vorzyklus).
+          // Die Merker des Power-Pfads werden nur hier verwaltet: außerhalb zurückgesetzt, damit ein neuer Powerbetrieb frisch beginnt
+          bool boost = id(hzg_boost_aktiv) && !id(hzg_heizgrenze_aktiv);
+          bool power_pfad = (${BETRIEBSMODUS} == ${BM_POWER}) || boost;
+          if (!power_pfad) {
+            id(hzg_power_gesendet) = false;
+            id(hzg_power_vlmax) = false;
           }
 
           // Sensorfehler = Fühleranzahl beim Start falsch oder einer der vier Dallas-Fühler liefert NaN
@@ -1435,13 +1479,8 @@ script:
           // Vorlauf-Max (P60) bleibt aktiv: solange VL >= Max, ZU (wie im Regelbetrieb)
           if (${BETRIEBSMODUS} == ${BM_MANUELL}) {
             float vlm = id(vorlauf).state;
-            if (!isnan(vlm) && vlm >= id(vorlauf_max).state) {
-              id(letzte_prioritaet) = 60;
-              if (prio_alt != 60 || id(mischer_pos) > 2.0f) {
-                ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> ZU", vlm);
-                id(ha_mischer_zu).execute();
-              }
-            }
+            if (!isnan(vlm) && vlm >= id(vorlauf_max).state && zu_halten(60))
+              ESP_LOGW("regelung", "P60 (Manuell): Vorlauf-Max erreicht (VL=%.1f) -> ZU", vlm);
             return;
           }
 
@@ -1481,16 +1520,14 @@ script:
                    at, id(soll_vorlauf).state, soll_vl, diff, vl);
 
           // Integrator mit Prädiktion
-          // Position des Mischers in % (aus dem Aktor-Ist, siehe oben)
-          float pos_ist = id(mischer_pos);
           // Nach Eingriffen von außen (manuell, Heizgrenze, Vorlauf-Max) die Zielposition an das Ist angleichen,
           // nicht während der Mischer nach der P65-Freigabe auf die Startposition fährt
           if (id(hzg_anfahr_zyklen) > 0) id(hzg_anfahr_zyklen) -= 1;
-          if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - id(pos_ziel)) > 5.0f) {
+          if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - id(pos_ziel)) > POS_ANGLEICH) {
             id(pos_ziel) = pos_ist;
           }
           // Ebenso den letzten Befehl, wenn der Mischer von außen bewegt wurde (Manuell, Taster, ZU-Befehle)
-          if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - (float) id(pos_gesendet)) > 5.0f) {
+          if (id(hzg_anfahr_zyklen) == 0 && fabsf(pos_ist - (float) id(pos_gesendet)) > POS_ANGLEICH) {
             id(pos_gesendet) = (int) roundf(pos_ist);
           }
           // Vorlauftrend (K pro ca. 3 min) fortschreiben, damit die Totzeit der Strecke berücksichtigt wird
@@ -1507,7 +1544,7 @@ script:
           auto fahre_start = [&]() -> bool {
             int start = (int) roundf(id(pos_start).state);
             id(pos_ziel) = (float) start;
-            if (fabsf(pos_ist - (float) start) <= 3.0f) return false;
+            if (fabsf(pos_ist - (float) start) <= POS_START_TOL) return false;
             id(mischer_fahre_position).execute(start);
             id(mischer_pos) = (float) start;
             id(pos_gesendet) = start;
@@ -1518,13 +1555,14 @@ script:
           // BLOCK 2: Prioritäten und Aktionen
           // -------------------------------------------------------
 
-          // HZG Powerbetrieb: Regelung ausgesetzt, Mischer voll auf (Befehl wird nachgesendet, bis der Mischer oben ist). P60 (Vorlauf-Max) und P50 (Kessel-Schutz) bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht.
-          // Boost beim Vorheizen nutzt denselben Pfad, aber nicht oberhalb der Heizgrenze (Stand Vorzyklus)
-          bool boost = id(hzg_boost_aktiv) && !id(hzg_heizgrenze_aktiv);
-          if (${BETRIEBSMODUS} == ${BM_POWER} || boost) {
+          // P85 Power-Pfad (power_pfad, siehe oben): Regelung ausgesetzt, Mischer voll auf. P60 (Vorlauf-Max) und P50 (Kessel-Schutz)
+          // bleiben aktiv, Heizgrenze (P70) und P80 gelten nicht
+          if (power_pfad) {
             id(hzg_power_war_aktiv) = true;
             id(hzg_anfahr_zyklen) = 0;
-            // Hysterese 5 K, damit der Mischer nicht zwischen ZU und 100 % pendelt
+            // ein P65 von vor dem Powerbetrieb gilt nicht weiter, nach dem Ende wird P65 neu bewertet
+            id(hzg_vl_unerreichbar) = false;
+            // Hysterese POWER_VLMAX_HYST, damit der Mischer nicht zwischen ZU und 100 % pendelt
             if (vl >= id(vorlauf_max).state && !id(hzg_power_vlmax)) {
               id(hzg_power_vlmax) = true;
               ESP_LOGW("regelung", "P60 (Power): Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
@@ -1532,7 +1570,7 @@ script:
               id(ha_mischer_zu).execute();
             }
             if (id(hzg_power_vlmax)) {
-              if (vl < id(vorlauf_max).state - 5.0f) {
+              if (vl < id(vorlauf_max).state - POWER_VLMAX_HYST) {
                 id(hzg_power_vlmax) = false;
               } else {
                 id(letzte_prioritaet) = 60;
@@ -1550,15 +1588,25 @@ script:
             }
             id(letzte_prioritaet) = 85;
             id(pos_ziel) = 100.0f;
-            // jeden Zyklus nachsenden, solange der Mischer nicht oben ist (Ist < 97 %, falls der Aktor oben nur 99 % meldet).
-            // Fängt verworfene, verlorene oder durch eine Gegenfahrt überholte Befehle ab: am 24.11.2026 fuhr der Aktor
-            // einen ZU-Befehl (P65 beim kurzen Regelbetrieb nach Ablauf von HZG_Power_Dauer) bis 0 % durch und
-            // verwarf den einmaligen 100-%-Befehl, der Powerbetrieb blieb danach mit geschlossenem Mischer stehen
-            if (!id(hzg_power_gesendet) || pos_ist < 97.0f) {
+            // Nachsenden, solange der Mischer nicht oben ist (Ist < POS_OBEN, falls der Aktor oben nur 99 % meldet).
+            // Der Aktor (Tuya TS130F) nimmt während einer Fahrt keinen Positionsbefehl an: eine laufende ZU-Fahrt
+            // (z. B. P65 beim kurzen Regelbetrieb nach Ablauf von HZG_Power_Dauer) fährt er trotz 100-%-Befehl bis 0 %
+            // durch (26.11.2026: Vorlauf 45 -> 33 °C), ein Befehl während der AUF-Fahrt unterbricht sie kurz.
+            // Deshalb nach der Fahrtrichtung (Ist gegenüber dem Vorzyklus):
+            //   fällt  -> Aktor fährt zu: anhalten, im nächsten Zyklus 100 % senden
+            //   steigt -> Aktor fährt bereits auf: nichts senden
+            //   steht  -> 100 % senden
+            bool faehrt_zu  = pos_vorher >= 0.0f && pos_ist < pos_vorher - POS_RICHTUNG;
+            bool faehrt_auf = pos_vorher >= 0.0f && pos_ist > pos_vorher + POS_RICHTUNG;
+            if (pos_ist < POS_OBEN && faehrt_zu) {
+              ESP_LOGI("regelung", "P85: Aktor fährt zu (Ist %.1f%%, vorher %.1f%%) -> anhalten", pos_ist, pos_vorher);
+              id(ha_mischer_stop).execute();
+              id(hzg_power_gesendet) = false;
+            } else if (!id(hzg_power_gesendet) || (pos_ist < POS_OBEN && !faehrt_auf)) {
               if (!id(hzg_power_gesendet))
                 ESP_LOGI("regelung", "P85: %s -> Mischer auf 100%% (Ist %.1f%%)", boost ? "Boost" : "Powerbetrieb", pos_ist);
               else
-                ESP_LOGD("regelung", "P85: Mischer noch nicht oben (Ist %.1f%%) -> 100%% nachgesendet", pos_ist);
+                ESP_LOGD("regelung", "P85: Mischer steht unter %.0f%% (Ist %.1f%%) -> 100%% nachgesendet", POS_OBEN, pos_ist);
               id(mischer_fahre_position).execute(100);
               id(mischer_pos) = 100.0f;
               id(pos_gesendet) = 100;
@@ -1571,7 +1619,7 @@ script:
           bool power_ende = id(hzg_power_war_aktiv);
           id(hzg_power_war_aktiv) = false;
 
-          // PRIORITÄT 1: Heizgrenze (vor P80, sonst stellt P80 den Mischer vor und P70 fährt ihn gleich wieder zu)
+          // P70 Heizgrenze (vor P80, sonst stellt P80 den Mischer vor und P70 fährt ihn gleich wieder zu)
           // Eintritt bei AT >= Heizgrenze, Freigabe erst HEIZGRENZE_HYST darunter; nach der Freigabe springt der Mischer unten auf die Startposition
           // Im Vorlaufbetrieb gilt die Heizgrenze nicht; war sie aktiv, springt der Mischer unten auf die Startposition
           bool heizgrenze_ende = false;
@@ -1589,23 +1637,19 @@ script:
             ESP_LOGI("regelung", "P70: AT=%.1f unter Heizgrenze - ${HEIZGRENZE_HYST} K -> Regelung frei", at);
           }
           if (id(hzg_heizgrenze_aktiv)) {
-            id(letzte_prioritaet) = 70;
             id(hzg_anfahr_zyklen) = 0;
-            if (prio_alt != 70 || pos_ist > 2.0f) {
-              ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
-              id(ha_mischer_zu).execute();
-            }
+            if (zu_halten(70)) ESP_LOGI("regelung", "P70: Heizgrenze erreicht (AT=%.1f) -> Mischer ZU", at);
             return;
           }
 
-          // PRIORITÄT 0: Alle Ventile geschlossen
+          // P80 Alle Ventile geschlossen
           if (!id(ventil_offen).state) {
             id(letzte_prioritaet) = 80;
             id(hzg_anfahr_zyklen) = 0;
             // bei heißem Zulauf den Mischer auf die Startposition vorstellen, damit der Anlauf nicht überschwingt,
             // nicht bei aktivem P65 (der Mischer würde nach dem Öffnen der Ventile sofort wieder zugefahren)
             // Sonst Mischer beim Eintritt anhalten, Position halten
-            if (zl - soll_vl > 15.0f && !id(hzg_vl_unerreichbar)) {
+            if (zl - soll_vl > P80_ZL_UEBER && !id(hzg_vl_unerreichbar)) {
               if (fahre_start()) ESP_LOGI("regelung", "P80: Alle Ventile zu, heißer Zulauf -> Mischer auf Startposition");
             } else if (prio_alt != 80) {
               ESP_LOGI("regelung", "P80: Alle Ventile zu -> Regelung pausiert");
@@ -1614,18 +1658,14 @@ script:
             return;
           }
 
-          // PRIORITÄT 2: Vorlauf-Max Schutz
+          // P60 Vorlauf-Max Schutz
           if (vl >= id(vorlauf_max).state) {
-            id(letzte_prioritaet) = 60;
             id(hzg_anfahr_zyklen) = 0;
-            if (prio_alt != 60 || pos_ist > 2.0f) {
-              ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
-              id(ha_mischer_zu).execute();
-            }
+            if (zu_halten(60)) ESP_LOGW("regelung", "P60: Vorlauf-Max erreicht (VL=%.1f) -> sofort ZU", vl);
             return;
           }
 
-          // PRIORITÄT 3: Kessel-Schutz
+          // P50 Kessel-Schutz
           if (zl < id(kessel_min).state) {
             id(letzte_prioritaet) = 50;
             id(hzg_anfahr_zyklen) = 0;
@@ -1636,7 +1676,7 @@ script:
             return;
           }
 
-          // PRIORITÄT 4: Soll-VL deutlich unter dem Rücklauf, der Mischer kann ihn nicht erreichen -> ZU.
+          // P65 Soll-VL deutlich unter dem Rücklauf, der Mischer kann ihn nicht erreichen -> ZU.
           // Eintritt erst 2 K unter dem RL: bei geringer Last liegt der RL nur ca. 1 K unter dem VL,
           // kleine Unterschreitungen regelt der Integrator, statt den laufenden Mischer ganz zuzufahren.
           // Freigabe, wenn der Soll-VL 1 K über seinen kleinsten Wert seit dem Zufahren gestiegen ist und
@@ -1647,54 +1687,51 @@ script:
           // hochzukriechen (dauerte 15-24 min, Vorlauf so lange 2-4 K unter Soll)
           // Im Vorlaufbetrieb ist P65 aus (Soll-VL unter dem RL: der Mischer regelt bis zur Untergrenze pos_min herunter);
           // war P65 aktiv, wird freigegeben (Startsprung auf die Startposition)
-          bool p65_frei = false, p65_eintritt = false;
+          bool p65_frei = false;
           if (vorlaufbetrieb) {
             if (id(hzg_vl_unerreichbar)) {
               p65_frei = true;
               ESP_LOGI("regelung", "P65: Vorlaufbetrieb -> Regelung frei");
             }
-          } else if (!id(hzg_vl_unerreichbar) && soll_vl < rl - 2.0f) {
-            p65_eintritt = true;
+          } else if (!id(hzg_vl_unerreichbar) && soll_vl < rl - P65_EIN) {
             id(hzg_vl_unerreichbar) = true;
             id(hzg_vl_unerreichbar_soll) = soll_vl;
             id(hzg_anfahr_zyklen) = 0;
             ESP_LOGI("regelung", "P65: Soll-VL %.1f unter RL %.1f -> Mischer ZU", soll_vl, rl);
           } else if (id(hzg_vl_unerreichbar)) {
             id(hzg_vl_unerreichbar_soll) = min(id(hzg_vl_unerreichbar_soll), soll_vl);
-            if (soll_vl > id(hzg_vl_unerreichbar_soll) + 1.0f && soll_vl > rl - 1.0f) {
+            if (soll_vl > id(hzg_vl_unerreichbar_soll) + P65_FREI_ANSTIEG && soll_vl > rl - P65_FREI_RL) {
               p65_frei = true;
               ESP_LOGI("regelung", "P65: Soll-VL auf %.1f gestiegen -> Regelung frei", soll_vl);
-            } else if (soll_vl > rl + 3.0f) {
+            } else if (soll_vl > rl + P65_FREI_ABK) {
               p65_frei = true;
               ESP_LOGI("regelung", "P65: RL %.1f mehr als 3 K unter Soll-VL %.1f -> Regelung frei", rl, soll_vl);
             }
           }
           if (id(hzg_vl_unerreichbar) && !p65_frei) {
-            id(letzte_prioritaet) = 65;
             id(pos_ziel) = 0.0f;
             id(pos_gesendet) = 0;
-            // ZU beim Eintritt und solange das Ist noch nicht zu meldet
-            if (p65_eintritt || pos_ist > 2.0f) id(ha_mischer_zu).execute();
+            zu_halten(65);  // Logmeldung kommt beim Eintritt (oben)
             return;
           }
           id(hzg_vl_unerreichbar) = false;
 
-          // Startsprung nach der P65-Freigabe und nach dem Ende der Heizgrenze (aus 0 % hoch) sowie nach dem Powerbetrieb (von 100 % herunter)
+          // P66 Startsprung nach der P65-Freigabe und nach dem Ende der Heizgrenze (aus 0 % hoch) sowie nach dem Powerbetrieb (von 100 % herunter)
           if ((p65_frei || power_ende || heizgrenze_ende) && fahre_start()) {
-            id(hzg_anfahr_zyklen) = 12;  // höchstens 3 min warten, bis der Aktor dort ist
+            id(hzg_anfahr_zyklen) = ANFAHR_ZYKLEN;
             ESP_LOGI("regelung", "%s -> Mischer auf Startposition %.0f%% (Ist %.1f%%)",
                      p65_frei ? "P65-Freigabe" : (power_ende ? "Ende Powerbetrieb" : "Ende Heizgrenze"), id(pos_ziel), pos_ist);
           }
-          // Mischer fährt noch auf die Startposition: Integrator ruht, bis das Ist auf 3 % heran ist
-          if (id(hzg_anfahr_zyklen) > 0 && fabsf(pos_ist - id(pos_ziel)) > 3.0f) {
-            id(letzte_prioritaet) = 65;
+          // Mischer fährt noch auf die Startposition: Integrator ruht, bis das Ist auf POS_START_TOL heran ist
+          if (id(hzg_anfahr_zyklen) > 0 && fabsf(pos_ist - id(pos_ziel)) > POS_START_TOL) {
+            id(letzte_prioritaet) = 66;
             return;
           }
           id(hzg_anfahr_zyklen) = 0;
 
           // P55: Kessel kalt (ZL-RL < 5 K), der Mischer hat keine Wirkung -> Position halten.
           // Sonst läuft der Integrator hoch (bis 99 % beobachtet) und der Vorlauf schwingt beim Kesselstart über
-          if (zl - rl < 5.0f) {
+          if (zl - rl < P55_SPREIZUNG) {
             id(letzte_prioritaet) = 55;
             ESP_LOGI("regelung", "P55: ZL-RL %.1f K < 5 K, Mischer ohne Wirkung -> Position halten", zl - rl);
             return;
@@ -1708,8 +1745,8 @@ script:
             return;
           }
 
-          // Positionsschritt pro Zyklus in %, begrenzt auf +-2 %
-          float delta = max(-2.0f, min(2.0f, id(pid_kp).state * fehler));
+          // Positionsschritt pro Zyklus in %, begrenzt auf +-SCHRITT_MAX
+          float delta = max(-SCHRITT_MAX, min(SCHRITT_MAX, id(pid_kp).state * fehler));
           float pos_alt = id(pos_ziel);
           // Die Untergrenze pos_min gilt nur nach unten, aus einer Stellung darunter wird nicht nach oben gezwungen
           float untergrenze = min(id(pos_min).state, pos_alt);
